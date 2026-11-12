@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { quizzes, questions, participants } from "@/db/schema";
+import { quizzes, questions, participants, type Participant, type Question } from "@/db/schema";
 import { eq, asc, and } from "drizzle-orm";
 import {
   ensureSeeded,
@@ -19,6 +19,61 @@ function extractToken(req: NextRequest, slug: string): string | null {
   const cookieToken = req.cookies.get(`quiz_session_${slug}`)?.value?.trim();
   if (cookieToken) return cookieToken;
   return null;
+}
+
+function buildStudentQuestions(
+  participant: Participant,
+  qList: Question[],
+  includeCorrectAnswers: boolean
+) {
+  const qMap = new Map(qList.map((q) => [q.id, q]));
+  const orderedIds =
+    participant.questionOrder && participant.questionOrder.length > 0
+      ? participant.questionOrder.filter((id) => qMap.has(id))
+      : qList.map((q) => q.id);
+
+  // Include any newly added questions by instructor if not in original order
+  for (const q of qList) {
+    if (!orderedIds.includes(q.id)) {
+      orderedIds.push(q.id);
+    }
+  }
+
+  return orderedIds.map((qId, displayNumber) => {
+    const q = qMap.get(qId)!;
+    const perm =
+      participant.optionOrders?.[qId] &&
+      participant.optionOrders[qId].length === q.options.length
+        ? participant.optionOrders[qId]
+        : q.options.map((_, i) => i);
+
+    const shuffledOptions = perm.map((origIdx) => q.options[origIdx]);
+    const savedOrigIdx = participant.answers?.[qId];
+    const selectedDisplayIndex =
+      typeof savedOrigIdx === "number" ? perm.indexOf(savedOrigIdx) : -1;
+    const selectedVal = selectedDisplayIndex >= 0 ? selectedDisplayIndex : null;
+
+    if (!includeCorrectAnswers) {
+      return {
+        id: q.id,
+        number: displayNumber + 1,
+        questionText: q.questionText,
+        options: shuffledOptions,
+        selectedDisplayIndex: selectedVal,
+      };
+    }
+
+    const correctDisplayIndex = perm.indexOf(q.correctOptionIndex);
+    return {
+      id: q.id,
+      number: displayNumber + 1,
+      questionText: q.questionText,
+      options: shuffledOptions,
+      selectedDisplayIndex: selectedVal,
+      correctDisplayIndex: correctDisplayIndex >= 0 ? correctDisplayIndex : 0,
+      isCorrect: selectedVal !== null && selectedVal === correctDisplayIndex,
+    };
+  });
 }
 
 export async function GET(
@@ -117,41 +172,7 @@ export async function GET(
     ).length;
 
     if (participant.status === "in_progress" && remainingSeconds > 0) {
-      const qMap = new Map(qList.map((q) => [q.id, q]));
-      const orderedIds =
-        participant.questionOrder && participant.questionOrder.length > 0
-          ? participant.questionOrder.filter((id) => qMap.has(id))
-          : qList.map((q) => q.id);
-
-      // Include any newly added questions by instructor if not in original order
-      for (const q of qList) {
-        if (!orderedIds.includes(q.id)) {
-          orderedIds.push(q.id);
-        }
-      }
-
-      const safeQuestions = orderedIds.map((qId, displayNumber) => {
-        const q = qMap.get(qId)!;
-        const perm =
-          participant.optionOrders?.[qId] &&
-          participant.optionOrders[qId].length === q.options.length
-            ? participant.optionOrders[qId]
-            : q.options.map((_, i) => i);
-
-        const shuffledOptions = perm.map((origIdx) => q.options[origIdx]);
-        const savedOrigIdx = participant.answers?.[qId];
-        const selectedDisplayIndex =
-          typeof savedOrigIdx === "number" ? perm.indexOf(savedOrigIdx) : -1;
-
-        return {
-          id: q.id,
-          number: displayNumber + 1,
-          questionText: q.questionText,
-          options: shuffledOptions,
-          selectedDisplayIndex:
-            selectedDisplayIndex >= 0 ? selectedDisplayIndex : null,
-        };
-      });
+      const safeQuestions = buildStudentQuestions(participant, qList, false);
 
       return NextResponse.json({
         authenticated: true,
@@ -217,6 +238,9 @@ export async function GET(
         maxParticipants: quiz.maxParticipants,
       },
       leaderboard,
+      reviewQuestions: quiz.resultsPublished
+        ? buildStudentQuestions(participant, qList, true)
+        : null,
     });
   } catch (error) {
     console.error("GET /api/quiz/[slug]/session error:", error);

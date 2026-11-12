@@ -6,6 +6,7 @@ import Link from "next/link";
 import {
   Clock,
   CheckCircle2,
+  XCircle,
   ShieldCheck,
   Sparkles,
   ChevronRight,
@@ -82,6 +83,11 @@ interface SafeQuestion {
   selectedDisplayIndex: number | null;
 }
 
+interface ReviewQuestion extends SafeQuestion {
+  correctDisplayIndex: number;
+  isCorrect: boolean;
+}
+
 interface SessionData {
   authenticated: boolean;
   phase?: "in_progress" | "waiting" | "leaderboard" | "scheduled";
@@ -114,6 +120,7 @@ interface SessionData {
     maxParticipants: number;
   };
   questions?: SafeQuestion[];
+  reviewQuestions?: ReviewQuestion[] | null;
   leaderboard?: LeaderboardRow[] | null;
 }
 
@@ -148,6 +155,10 @@ export default function StudentQuizPage() {
   const [submitting, setSubmitting] = useState(false);
   const autoSubmitTriggeredRef = useRef(false);
   const deadlineMsRef = useRef<number | null>(null);
+
+  // Answer Review UI State (Phase 4)
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewFilter, setReviewFilter] = useState<"all" | "wrong">("all");
 
   // Scheduled-start state: server/client clock offset + 1s tick for countdowns
   const serverOffsetRef = useRef(0);
@@ -193,7 +204,11 @@ export default function StudentQuizPage() {
         setPublicInfo(pubData.quiz);
         setPublicLeaderboard(pubData.leaderboard || null);
 
-        if (pubData.quiz.seatsRemaining === 0 && !pubData.quiz.resultsPublished) {
+        if (
+          pubData.quiz.seatsRemaining === 0 ||
+          pubData.quiz.resultsPublished ||
+          !pubData.quiz.isActive
+        ) {
           setEntryMode((prev) => (prev === "new" ? "recover" : prev));
         }
 
@@ -1026,6 +1041,19 @@ export default function StudentQuizPage() {
     session.leaderboard
   ) {
     const p = session.participant!;
+    const reviewList = session.reviewQuestions ?? [];
+    const wrongQuestions = reviewList.filter((q) => !q.isCorrect);
+    const correctCount = reviewList.length - wrongQuestions.length;
+    const displayedReview =
+      reviewFilter === "wrong" && wrongQuestions.length > 0
+        ? wrongQuestions
+        : reviewList;
+    const safeReviewIdx = Math.min(
+      reviewIndex,
+      Math.max(0, displayedReview.length - 1)
+    );
+    const activeReviewQ = displayedReview[safeReviewIdx];
+
     return (
       <div className="min-h-screen bg-slate-50 py-10 px-4 sm:px-6">
         <div className="mx-auto max-w-3xl space-y-6">
@@ -1068,11 +1096,211 @@ export default function StudentQuizPage() {
               <div className="rounded-2xl border border-teal-200 bg-white px-6 py-3 text-center shadow-2xs">
                 <p className="text-xs text-slate-500">درجتك النهائية</p>
                 <p className="mt-0.5 font-mono-num text-3xl font-bold text-teal-700">
-                  {p.score} <span className="text-lg text-slate-400">/ {p.totalQuestions}</span>
+                  {p.score}{" "}
+                  <span className="text-lg text-slate-400">
+                    / {p.totalQuestions}
+                  </span>
                 </p>
               </div>
             </div>
           </div>
+
+          {/* Question-by-Question Answer Review */}
+          {reviewList.length > 0 && activeReviewQ && (
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-xs sm:p-7 space-y-5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                <div>
+                  <h2 className="text-lg font-bold text-slate-900">
+                    مراجعة إجاباتك ومعرفة الأخطاء
+                  </h2>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs font-semibold">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 text-emerald-700">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      {correctCount} إجابة صحيحة
+                    </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 border border-rose-200 px-2.5 py-0.5 text-rose-700">
+                      <XCircle className="h-3.5 w-3.5" />
+                      {wrongQuestions.length} أخطاء / بدون إجابة
+                    </span>
+                  </div>
+                </div>
+
+                {wrongQuestions.length > 0 && (
+                  <div className="inline-flex rounded-xl bg-slate-100 p-1 text-xs font-bold">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReviewFilter("all");
+                        setReviewIndex(0);
+                      }}
+                      className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
+                        reviewFilter === "all"
+                          ? "bg-white text-slate-900 shadow-2xs"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      الكل ({reviewList.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setReviewFilter("wrong");
+                        setReviewIndex(0);
+                      }}
+                      className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
+                        reviewFilter === "wrong"
+                          ? "bg-white text-rose-700 shadow-2xs"
+                          : "text-slate-600 hover:text-slate-900"
+                      }`}
+                    >
+                      الأخطاء فقط ({wrongQuestions.length})
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Numbered Question Navigator Pills */}
+              <div className="flex flex-wrap gap-2">
+                {displayedReview.map((rq, idx) => {
+                  const isCurrent = idx === safeReviewIdx;
+                  return (
+                    <button
+                      key={rq.id}
+                      type="button"
+                      onClick={() => setReviewIndex(idx)}
+                      className={`flex h-9 min-w-9 items-center justify-center rounded-xl border px-2 font-mono-num text-xs font-bold transition cursor-pointer ${
+                        rq.isCorrect
+                          ? "border-emerald-300 bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
+                          : "border-rose-300 bg-rose-50 text-rose-800 hover:bg-rose-100"
+                      } ${isCurrent ? "ring-2 ring-slate-900 ring-offset-1" : ""}`}
+                    >
+                      {rq.number}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Active Question Card */}
+              <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-5 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs font-bold text-slate-500">
+                    سؤال {activeReviewQ.number} من {reviewList.length}
+                  </span>
+                  {activeReviewQ.isCorrect ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      إجابتك صحيحة
+                    </span>
+                  ) : activeReviewQ.selectedDisplayIndex === null ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                      لم تُجب على هذا السؤال
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-3 py-1 text-xs font-bold text-rose-800">
+                      <XCircle className="h-3.5 w-3.5" />
+                      إجابة خاطئة
+                    </span>
+                  )}
+                </div>
+
+                <h3 className="text-base font-bold leading-relaxed text-slate-900 sm:text-lg">
+                  {activeReviewQ.questionText}
+                </h3>
+
+                <div className="space-y-2.5">
+                  {activeReviewQ.options.map((optText, optIdx) => {
+                    const isCorrectOpt =
+                      optIdx === activeReviewQ.correctDisplayIndex;
+                    const isStudentChoice =
+                      optIdx === activeReviewQ.selectedDisplayIndex;
+
+                    let cardStyle =
+                      "border-slate-200 bg-white text-slate-700";
+                    let badgeStyle =
+                      "border-slate-200 bg-slate-100 text-slate-600";
+
+                    if (isCorrectOpt) {
+                      cardStyle =
+                        "border-emerald-500 bg-emerald-50/80 text-emerald-950 font-semibold";
+                      badgeStyle =
+                        "border-emerald-500 bg-emerald-600 text-white";
+                    } else if (isStudentChoice && !isCorrectOpt) {
+                      cardStyle =
+                        "border-rose-400 bg-rose-50/80 text-rose-950";
+                      badgeStyle = "border-rose-500 bg-rose-600 text-white";
+                    }
+
+                    return (
+                      <div
+                        key={optIdx}
+                        className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3.5 text-sm ${cardStyle}`}
+                      >
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-xs font-bold ${badgeStyle}`}
+                          >
+                            {ARABIC_OPTION_LABELS[optIdx] ?? optIdx + 1}
+                          </span>
+                          <span className="leading-relaxed">{optText}</span>
+                        </div>
+
+                        {isCorrectOpt && isStudentChoice && (
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            إجابتك (صحيحة)
+                          </span>
+                        )}
+                        {isCorrectOpt && !isStudentChoice && (
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            الإجابة الصحيحة
+                          </span>
+                        )}
+                        {isStudentChoice && !isCorrectOpt && (
+                          <span className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold text-white">
+                            <XCircle className="h-3.5 w-3.5" />
+                            إجابتك
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Prev / Next Question Flip Controls */}
+              <div className="flex items-center justify-between pt-1">
+                <button
+                  type="button"
+                  onClick={() => setReviewIndex((i) => Math.max(0, i - 1))}
+                  disabled={safeReviewIdx === 0}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                  <span>السابق</span>
+                </button>
+
+                <span className="font-mono-num text-xs font-bold text-slate-500">
+                  {safeReviewIdx + 1} / {displayedReview.length}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setReviewIndex((i) =>
+                      Math.min(displayedReview.length - 1, i + 1)
+                    )
+                  }
+                  disabled={safeReviewIdx >= displayedReview.length - 1}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-bold text-white hover:bg-slate-800 disabled:opacity-40 cursor-pointer disabled:cursor-not-allowed"
+                >
+                  <span>التالي</span>
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+          )}
 
           <LeaderboardCard
             entries={session.leaderboard}

@@ -10,6 +10,7 @@ import {
   shuffleArray,
   syncExpiredParticipants,
 } from "@/lib/quiz-service";
+import { getScheduleInfo } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -128,6 +129,20 @@ export async function POST(
       );
     }
 
+    const joinNow = new Date();
+    const schedule = getScheduleInfo(quiz.startsAt, joinNow);
+    if (schedule.state === "not_open") {
+      return NextResponse.json(
+        {
+          error: "الكويز لم يبدأ بعد، والتسجيل لم يُفتح حتى الآن.",
+          code: "not_started",
+          startsAt: schedule.startsAt!.toISOString(),
+          registrationOpensAt: schedule.registrationOpensAt!.toISOString(),
+        },
+        { status: 403 }
+      );
+    }
+
     if (existingList.length >= quiz.maxParticipants) {
       return NextResponse.json(
         {
@@ -145,8 +160,16 @@ export async function POST(
       optionOrders[q.id] = shuffleArray(indices);
     }
 
+    // During the pre-start registration window the student's clock is anchored
+    // to the scheduled start, so everyone begins (and ends) together.
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + quiz.durationMinutes * 60 * 1000);
+    const startedAt =
+      schedule.state === "registration" && schedule.startsAt
+        ? schedule.startsAt
+        : now;
+    const expiresAt = new Date(
+      startedAt.getTime() + quiz.durationMinutes * 60 * 1000
+    );
     const participantId = generateId("stu");
     const sessionToken = generateSessionToken();
 
@@ -163,7 +186,7 @@ export async function POST(
       status: "in_progress",
       score: 0,
       totalQuestions: qList.length,
-      startedAt: now,
+      startedAt,
       expiresAt,
     });
 

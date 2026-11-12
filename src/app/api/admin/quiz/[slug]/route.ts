@@ -8,6 +8,7 @@ import {
   syncExpiredParticipants,
   buildLeaderboard,
   computeScore,
+  toAdminQuiz,
 } from "@/lib/quiz-service";
 
 export const dynamic = "force-dynamic";
@@ -59,8 +60,12 @@ export async function GET(
 
     const now = new Date();
     const participantsDetailed = pList.map((p) => {
-      const remainingSeconds =
-        p.status === "in_progress"
+      const notStartedYet =
+        p.status === "in_progress" &&
+        new Date(p.startedAt).getTime() > now.getTime();
+      const remainingSeconds = notStartedYet
+        ? quiz.durationMinutes * 60
+        : p.status === "in_progress"
           ? Math.max(
               0,
               Math.floor(
@@ -88,7 +93,7 @@ export async function GET(
     const leaderboardPreview = buildLeaderboard(pList, qList.length);
 
     return NextResponse.json({
-      quiz,
+      quiz: toAdminQuiz(quiz),
       questions: qList,
       participants: participantsDetailed,
       leaderboardPreview,
@@ -196,7 +201,52 @@ export async function PATCH(
       updates.instructorPin = body.instructorPin.trim();
     }
 
+    // Scheduled start: ISO string sets it, null / "" clears it.
+    if (body.startsAt === null || body.startsAt === "") {
+      updates.startsAt = null;
+    } else if (typeof body.startsAt === "string") {
+      const parsed = new Date(body.startsAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return NextResponse.json(
+          { error: "موعد بدء الكويز غير صالح." },
+          { status: 400 }
+        );
+      }
+      updates.startsAt = parsed;
+    }
+
     await db.update(quizzes).set(updates).where(eq(quizzes.id, quiz.id));
+
+    // If the schedule changed, move students who registered but have not
+    // started yet so their personal timer follows the new start time.
+    if ("startsAt" in updates) {
+      const shiftNow = new Date();
+      const newBase =
+        updates.startsAt && updates.startsAt.getTime() > shiftNow.getTime()
+          ? updates.startsAt
+          : shiftNow;
+      const duration = updates.durationMinutes ?? quiz.durationMinutes;
+
+      const waiting = await db
+        .select()
+        .from(participants)
+        .where(eq(participants.quizId, quiz.id));
+
+      for (const p of waiting) {
+        if (
+          p.status === "in_progress" &&
+          new Date(p.startedAt).getTime() > shiftNow.getTime()
+        ) {
+          await db
+            .update(participants)
+            .set({
+              startedAt: newBase,
+              expiresAt: new Date(newBase.getTime() + duration * 60 * 1000),
+            })
+            .where(eq(participants.id, p.id));
+        }
+      }
+    }
 
     const updatedRows = await db
       .select()
@@ -206,7 +256,7 @@ export async function PATCH(
 
     const res = NextResponse.json({
       ok: true,
-      quiz: updatedRows[0],
+      quiz: toAdminQuiz(updatedRows[0]),
     });
 
     if (updates.instructorPin) {

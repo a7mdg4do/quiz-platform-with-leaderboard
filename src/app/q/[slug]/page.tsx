@@ -41,6 +41,37 @@ interface PublicQuizInfo {
   participantsCount: number;
   completedCount: number;
   seatsRemaining: number;
+  startsAt?: string | null;
+  registrationOpensAt?: string | null;
+  scheduleState?: "none" | "not_open" | "registration" | "started";
+}
+
+function formatClockTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("ar-EG", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function formatDayAndTime(iso: string): string {
+  return new Date(iso).toLocaleString("ar-EG", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
+}
+
+function formatCountdown(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(h)}:${pad(m)}:${pad(sec)}`;
 }
 
 interface SafeQuestion {
@@ -53,7 +84,7 @@ interface SafeQuestion {
 
 interface SessionData {
   authenticated: boolean;
-  phase?: "in_progress" | "waiting" | "leaderboard";
+  phase?: "in_progress" | "waiting" | "leaderboard" | "scheduled";
   serverNow?: string;
   quiz?: {
     title: string;
@@ -61,6 +92,7 @@ interface SessionData {
     durationMinutes: number;
     maxParticipants: number;
     resultsPublished?: boolean;
+    startsAt?: string | null;
   };
   participant?: {
     id: string;
@@ -117,6 +149,11 @@ export default function StudentQuizPage() {
   const autoSubmitTriggeredRef = useRef(false);
   const deadlineMsRef = useRef<number | null>(null);
 
+  // Scheduled-start state: server/client clock offset + 1s tick for countdowns
+  const serverOffsetRef = useRef(0);
+  const lastScheduleFetchRef = useRef(0);
+  const [scheduleNowMs, setScheduleNowMs] = useState(0);
+
   const getStoredToken = useCallback(() => {
     if (typeof window === "undefined") return null;
     return window.localStorage.getItem(storageKey);
@@ -148,6 +185,11 @@ export default function StudentQuizPage() {
         }
 
         const pubData = await pubRes.json();
+        if (typeof pubData.serverNow === "string") {
+          const serverNowMs = Date.parse(pubData.serverNow);
+          serverOffsetRef.current = serverNowMs - Date.now();
+          setScheduleNowMs(serverNowMs);
+        }
         setPublicInfo(pubData.quiz);
         setPublicLeaderboard(pubData.leaderboard || null);
 
@@ -222,6 +264,41 @@ export default function StudentQuizPage() {
     return () => clearInterval(poll);
   }, [session?.phase, fetchAllState]);
 
+  // Scheduled start: which moment are we counting down to (if any)?
+  //  - registered student waiting         -> quiz start
+  //  - not registered, before registration -> registration opening
+  //  - not registered, registration window -> quiz start
+  let scheduleTargetIso: string | null = null;
+  if (session?.authenticated && session.phase === "scheduled") {
+    scheduleTargetIso = session.quiz?.startsAt ?? null;
+  } else if (!session?.authenticated && !publicInfo?.resultsPublished) {
+    if (publicInfo?.scheduleState === "not_open") {
+      scheduleTargetIso = publicInfo.registrationOpensAt ?? null;
+    } else if (publicInfo?.scheduleState === "registration") {
+      scheduleTargetIso = publicInfo.startsAt ?? null;
+    }
+  }
+
+  // Tick every second; re-sync with the server when the target moment arrives
+  // (or every 20s, to pick up schedule changes made by the instructor).
+  useEffect(() => {
+    if (!scheduleTargetIso) return;
+    const targetMs = Date.parse(scheduleTargetIso);
+    lastScheduleFetchRef.current = Date.now();
+
+    const timer = setInterval(() => {
+      const nowMs = Date.now() + serverOffsetRef.current;
+      setScheduleNowMs(nowMs);
+      const sinceFetch = Date.now() - lastScheduleFetchRef.current;
+      if ((nowMs >= targetMs && sinceFetch > 2500) || sinceFetch > 20000) {
+        lastScheduleFetchRef.current = Date.now();
+        fetchAllState(true);
+      }
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [scheduleTargetIso, fetchAllState]);
+
   const handleGeneratePin = () => {
     const random4 = String(Math.floor(1000 + Math.random() * 9000));
     setAccessCode(random4);
@@ -246,6 +323,10 @@ export default function StudentQuizPage() {
       const data = await res.json();
       if (!res.ok) {
         setJoinError(data.error || "تعذر الدخول إلى الاختبار.");
+        if (data.code === "not_started") {
+          // Registration is not open yet: refresh to show the "not started" page.
+          await fetchAllState(true);
+        }
         setJoining(false);
         return;
       }
@@ -385,6 +466,137 @@ export default function StudentQuizPage() {
           >
             العودة للصفحة الرئيسية
           </Link>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // SCHEDULED A: NOT REGISTERED YET + REGISTRATION NOT OPEN -> "QUIZ NOT STARTED"
+  // ============================================================================
+  if (
+    !session?.authenticated &&
+    !publicInfo.resultsPublished &&
+    publicInfo.scheduleState === "not_open" &&
+    publicInfo.startsAt &&
+    publicInfo.registrationOpensAt
+  ) {
+    const secondsToRegistration = Math.max(
+      0,
+      Math.ceil((Date.parse(publicInfo.registrationOpensAt) - scheduleNowMs) / 1000)
+    );
+
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4 py-10">
+        <div className="w-full max-w-lg space-y-5">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm sm:p-10">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border border-amber-200 bg-amber-50 text-amber-600">
+              <Clock className="h-9 w-9" />
+            </div>
+
+            <h1 className="mt-5 text-2xl font-bold text-slate-900">
+              الكويز لم يبدأ بعد
+            </h1>
+            <p className="mt-1 text-sm font-semibold text-teal-700">
+              {publicInfo.title}
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-slate-600">
+              سيبدأ الكويز يوم{" "}
+              <strong className="text-slate-900">
+                {formatDayAndTime(publicInfo.startsAt)}
+              </strong>
+              . يُفتح تسجيل بيانات الطلاب قبل الموعد بـ 10 دقائق، أي الساعة{" "}
+              <strong className="text-slate-900">
+                {formatClockTime(publicInfo.registrationOpensAt)}
+              </strong>
+              .
+            </p>
+
+            <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs text-slate-500">يُفتح التسجيل بعد</p>
+              <p
+                dir="ltr"
+                className="mt-1 font-mono-num text-3xl font-bold tracking-wider text-slate-900"
+              >
+                {formatCountdown(secondsToRegistration)}
+              </p>
+            </div>
+
+            <p className="mt-5 text-xs text-slate-500">
+              لا حاجة لتحديث الصفحة، ستنتقل تلقائياً إلى صفحة التسجيل عند فتحه.
+              (الأوقات المعروضة بتوقيت جهازك)
+            </p>
+          </div>
+
+          <div className="text-center text-xs text-slate-500">
+            <Link href="/" className="font-semibold hover:text-slate-800">
+              العودة للصفحة الرئيسية
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // SCHEDULED B: REGISTERED, WAITING FOR THE QUIZ START TIME
+  // ============================================================================
+  if (
+    session?.authenticated &&
+    session.phase === "scheduled" &&
+    session.quiz?.startsAt
+  ) {
+    const startIso = session.quiz.startsAt;
+    const secondsToStart = Math.max(
+      0,
+      Math.ceil((Date.parse(startIso) - scheduleNowMs) / 1000)
+    );
+
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4 py-10">
+        <div className="w-full max-w-lg space-y-5">
+          <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm sm:p-10">
+            <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl border border-teal-200 bg-teal-50 text-teal-600">
+              <CheckCircle2 className="h-9 w-9" />
+            </div>
+
+            <h1 className="mt-5 text-2xl font-bold text-slate-900">
+              تم تسجيل بياناتك يا {session.participant?.studentName}
+            </h1>
+            <p className="mt-3 text-sm leading-relaxed text-slate-600">
+              الكويز لم يبدأ بعد وسيبدأ تلقائياً الساعة{" "}
+              <strong className="text-slate-900">
+                {formatClockTime(startIso)}
+              </strong>
+              . أبقِ هذه الصفحة مفتوحة وستظهر لك الأسئلة فور البدء، ومدة الحل{" "}
+              {session.quiz.durationMinutes} دقائق تُحسب من لحظة البدء.
+            </p>
+
+            <div className="mt-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <p className="text-xs text-slate-500">يبدأ الكويز بعد</p>
+              <p
+                dir="ltr"
+                className="mt-1 font-mono-num text-4xl font-bold tracking-wider text-teal-700"
+              >
+                {formatCountdown(secondsToStart)}
+              </p>
+            </div>
+
+            <p className="mt-5 text-xs text-slate-500">
+              (الأوقات المعروضة بتوقيت جهازك)
+            </p>
+          </div>
+
+          <div className="text-center">
+            <button
+              type="button"
+              onClick={handleSwitchStudentDevice}
+              className="inline-flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-800 cursor-pointer"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>تبديل الطالب على هذا الجهاز</span>
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -935,6 +1147,34 @@ export default function StudentQuizPage() {
           </div>
 
           <div className="p-6 sm:p-8">
+            {/* Registration window: registration is open but quiz hasn't started */}
+            {publicInfo.scheduleState === "registration" &&
+              publicInfo.startsAt && (
+                <div className="mb-5 rounded-xl border border-teal-200 bg-teal-50/70 p-4 text-center">
+                  <p className="text-sm font-bold text-teal-900">
+                    التسجيل مفتوح — الكويز يبدأ الساعة{" "}
+                    {formatClockTime(publicInfo.startsAt)}
+                  </p>
+                  <p
+                    dir="ltr"
+                    className="mt-1 font-mono-num text-2xl font-bold tracking-wider text-teal-800"
+                  >
+                    {formatCountdown(
+                      Math.max(
+                        0,
+                        Math.ceil(
+                          (Date.parse(publicInfo.startsAt) - scheduleNowMs) /
+                            1000
+                        )
+                      )
+                    )}
+                  </p>
+                  <p className="mt-1 text-xs text-teal-800">
+                    سجّل بياناتك الآن وانتظر، وسيبدأ الحل تلقائياً عند الموعد.
+                  </p>
+                </div>
+              )}
+
             {/* Mode Switcher Tabs */}
             <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1.5">
               <button
@@ -981,8 +1221,14 @@ export default function StudentQuizPage() {
                 <div className="flex items-start gap-2">
                   <Clock className="h-4 w-4 shrink-0 text-teal-600 mt-0.5" />
                   <span>
-                    يبدأ مؤقت الـ {publicInfo.durationMinutes} دقائق فور الضغط على
-                    بدء الاختبار مع حفظ تلقائي.
+                    {publicInfo.scheduleState === "registration" &&
+                    publicInfo.startsAt
+                      ? `يبدأ الكويز تلقائياً الساعة ${formatClockTime(
+                          publicInfo.startsAt
+                        )}، وتُحسب مدة الـ ${
+                          publicInfo.durationMinutes
+                        } دقائق من لحظة البدء مع حفظ تلقائي.`
+                      : `يبدأ مؤقت الـ ${publicInfo.durationMinutes} دقائق فور الضغط على بدء الاختبار مع حفظ تلقائي.`}
                   </span>
                 </div>
                 <div className="flex items-start gap-2">
@@ -1066,7 +1312,9 @@ export default function StudentQuizPage() {
                   ? "التسجيل الجديد مغلق من المعلم"
                   : publicInfo.seatsRemaining <= 0
                   ? `اكتمل عدد الطلاب (${publicInfo.maxParticipants}) — ادخل من تبويب طالب مسجل`
-                  : "بدء الاختبار الآن (10 دقائق)"}
+                  : publicInfo.scheduleState === "registration"
+                  ? "تسجيل بياناتي وانتظار بدء الكويز"
+                  : `بدء الاختبار الآن (${publicInfo.durationMinutes} دقائق)`}
               </button>
             </form>
           </div>

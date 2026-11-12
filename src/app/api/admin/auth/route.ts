@@ -10,8 +10,7 @@ export async function GET(req: NextRequest) {
     req.cookies.get("quiz_admin_pin")?.value?.trim();
 
   const authorized = await isAuthorizedInstructor(pin);
-  const usingDefaultPin = await isAuthorizedInstructor("2026");
-  return NextResponse.json({ authorized, usingDefaultPin });
+  return NextResponse.json({ authorized });
 }
 
 export async function POST(req: NextRequest) {

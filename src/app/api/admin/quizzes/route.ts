@@ -6,6 +6,7 @@ import {
   ensureSeeded,
   generateId,
   isAuthorizedInstructor,
+  toAdminQuiz,
 } from "@/lib/quiz-service";
 import { DEFAULT_QUESTIONS } from "@/lib/seed-data";
 
@@ -42,7 +43,7 @@ export async function GET(req: NextRequest) {
           .from(participants)
           .where(eq(participants.quizId, quiz.id));
         return {
-          ...quiz,
+          ...toAdminQuiz(quiz),
           questionsCount: qRows.length,
           participantsCount: pRows.length,
         };

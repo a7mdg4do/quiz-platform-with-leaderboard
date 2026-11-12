@@ -72,6 +72,13 @@ export function generateId(prefix: string): string {
   return `${prefix}_${randomBytes(8).toString("hex")}`;
 }
 
+/** Quiz row safe to send to the browser: never exposes the instructor PIN. */
+export function toAdminQuiz(quiz: Quiz): Omit<Quiz, "instructorPin"> {
+  const { instructorPin, ...rest } = quiz;
+  void instructorPin;
+  return rest;
+}
+
 export function generateSessionToken(): string {
   return randomBytes(24).toString("hex");
 }

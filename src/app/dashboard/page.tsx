@@ -43,9 +43,30 @@ interface QuizSummary {
   maxParticipants: number;
   isActive: boolean;
   resultsPublished: boolean;
-  instructorPin: string;
+  startsAt?: string | null;
   questionsCount?: number;
   participantsCount?: number;
+}
+
+function toLocalInputValue(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+
+function formatScheduleTime(iso: string | Date): string {
+  return new Date(iso).toLocaleString("ar-EG", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
 interface EditableQuestion {
@@ -73,7 +94,6 @@ interface AdminParticipant {
 export default function InstructorDashboardPage() {
   const [authChecking, setAuthChecking] = useState(true);
   const [authorized, setAuthorized] = useState(false);
-  const [usingDefaultPin, setUsingDefaultPin] = useState(false);
   const [pinInput, setPinInput] = useState("");
   const [pinError, setPinError] = useState<string | null>(null);
 
@@ -105,6 +125,7 @@ export default function InstructorDashboardPage() {
   const [durationInput, setDurationInput] = useState(10);
   const [maxStudentsInput, setMaxStudentsInput] = useState(5);
   const [isActiveInput, setIsActiveInput] = useState(true);
+  const [startsAtInput, setStartsAtInput] = useState("");
   const [newPinInput, setNewPinInput] = useState("");
 
   const showToast = (msg: string) => {
@@ -120,7 +141,6 @@ export default function InstructorDashboardPage() {
       const res = await fetch("/api/admin/auth", { cache: "no-store" });
       const data = await res.json();
       setAuthorized(!!data.authorized);
-      setUsingDefaultPin(!!data.usingDefaultPin);
     } catch {
       setAuthorized(false);
     } finally {
@@ -177,7 +197,8 @@ export default function InstructorDashboardPage() {
         setDurationInput(qz.durationMinutes);
         setMaxStudentsInput(qz.maxParticipants);
         setIsActiveInput(qz.isActive);
-        setNewPinInput(qz.instructorPin);
+        setStartsAtInput(toLocalInputValue(qz.startsAt));
+        setNewPinInput("");
       }
     },
     []
@@ -440,13 +461,20 @@ export default function InstructorDashboardPage() {
           durationMinutes: Number(durationInput),
           maxParticipants: Number(maxStudentsInput),
           isActive: isActiveInput,
-          instructorPin: newPinInput,
+          startsAt: startsAtInput
+            ? new Date(startsAtInput).toISOString()
+            : null,
+          instructorPin: newPinInput.trim() || undefined,
         }),
       });
       if (res.ok) {
+        setNewPinInput("");
         await loadQuizDetails(quiz.slug, questionsDirty);
         await loadQuizzesList();
         showToast("تم حفظ إعدادات الكويز بنجاح!");
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        showToast(errData.error || "تعذر حفظ الإعدادات.");
       }
     } finally {
       setSavingSettings(false);
@@ -477,18 +505,6 @@ export default function InstructorDashboardPage() {
           <p className="mt-2 text-center text-sm text-slate-600">
             أدخل رمز المعلم لإدارة الأسئلة، مشاركة الرابط، وإعلان لوحة الصدارة.
           </p>
-
-          {usingDefaultPin && (
-            <div className="mt-4 rounded-xl border border-teal-200 bg-teal-50/70 p-3 text-center text-xs text-teal-900">
-              رمز الدخول المبدئي للتشغيل الأول هو:{" "}
-              <strong className="font-mono-num text-sm">2026</strong>
-              <br />
-              <span className="text-teal-700">
-                (يمكنك تغييره من تبويب الإعدادات فور الدخول قبل إرسال الرابط
-                للطلاب)
-              </span>
-            </div>
-          )}
 
           <form onSubmit={handleLogin} className="mt-6 space-y-4">
             <div>
@@ -669,6 +685,15 @@ export default function InstructorDashboardPage() {
                 كل طالب يدخل من هذا الرابط يحصل تلقائياً على ترتيب مختلف للأسئلة
                 وترتيب مختلف لمواضع الخيارات (أ، ب، ج، د).
               </p>
+              {quiz.startsAt && (
+                <p className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-teal-200 bg-teal-50 px-2.5 py-1.5 text-xs font-semibold text-teal-900">
+                  <Clock className="h-3.5 w-3.5" />
+                  <span>
+                    موعد البدء: {formatScheduleTime(quiz.startsAt)} — يُفتح
+                    التسجيل قبله بـ 10 دقائق
+                  </span>
+                </p>
+              )}
             </div>
 
             {/* Master Publish Leaderboard Control */}
@@ -1135,21 +1160,52 @@ export default function InstructorDashboardPage() {
               </div>
             </div>
 
+            <div>
+              <label className="block text-sm font-bold text-slate-800">
+                موعد بدء الكويز (اختياري)
+              </label>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <input
+                  type="datetime-local"
+                  value={startsAtInput}
+                  onChange={(e) => setStartsAtInput(e.target.value)}
+                  className="flex-1 min-w-[220px] rounded-xl border border-slate-300 px-4 py-2.5 font-mono-num text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
+                />
+                {startsAtInput && (
+                  <button
+                    type="button"
+                    onClick={() => setStartsAtInput("")}
+                    className="rounded-xl border border-slate-200 px-3 py-2.5 text-xs font-semibold text-slate-600 hover:bg-slate-50 cursor-pointer"
+                  >
+                    إلغاء الجدولة
+                  </button>
+                )}
+              </div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                عند تحديد موعد (مثلاً 10:00 مساءً) يُفتح تسجيل بيانات الطلاب قبله
+                بـ 10 دقائق (9:50 مساءً) ويبدأ الكويز تلقائياً عند الموعد. من يدخل
+                الرابط قبل 9:50 تظهر له صفحة «الكويز لم يبدأ بعد». اتركه فارغاً
+                ليكون الكويز متاحاً دائماً. الوقت المعتمد هو توقيت جهازك الحالي.
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="block text-sm font-bold text-slate-800">
                   رمز المعلم السري (لدخول الداشبورد)
                 </label>
                 <input
-                  type="text"
-                  required
+                  type="password"
+                  autoComplete="new-password"
                   minLength={3}
                   value={newPinInput}
                   onChange={(e) => setNewPinInput(e.target.value)}
+                  placeholder="اتركه فارغاً للإبقاء على الرمز الحالي"
                   className="mt-1.5 w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono-num text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
                 />
                 <p className="mt-1 text-xs text-slate-500">
-                  غيّر الرمز قبل مشاركة الرابط مع الطلاب لضمان خصوصية الداشبورد.
+                  لا يُعرض الرمز الحالي لأسباب أمنية. اكتب رمزاً جديداً فقط إذا
+                  أردت تغييره.
                 </p>
               </div>
 

@@ -17,6 +17,9 @@ export const quizzes = pgTable("quizzes", {
   isActive: boolean("is_active").notNull().default(true),
   resultsPublished: boolean("results_published").notNull().default(false),
   instructorPin: text("instructor_pin").notNull().default("2026"),
+  // Optional scheduled start. When set, new students can register starting
+  // REGISTRATION_LEAD_MINUTES before this instant and the quiz opens at it.
+  startsAt: timestamp("starts_at", { withTimezone: true }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

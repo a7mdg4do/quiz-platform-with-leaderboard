@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { quizzes, questions, participants } from "@/db/schema";
 import { eq, and, asc } from "drizzle-orm";
 import { computeScore } from "@/lib/quiz-service";
+import { isBeforeStart } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,16 @@ export async function POST(
     }
 
     const participant = pRows[0];
+
+    if (
+      participant.status === "in_progress" &&
+      isBeforeStart(quiz.startsAt)
+    ) {
+      return NextResponse.json(
+        { error: "الكويز لم يبدأ بعد.", notStarted: true },
+        { status: 403 }
+      );
+    }
 
     if (participant.status !== "in_progress") {
       return NextResponse.json({

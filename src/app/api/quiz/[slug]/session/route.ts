@@ -7,6 +7,7 @@ import {
   syncExpiredParticipants,
   buildLeaderboard,
 } from "@/lib/quiz-service";
+import { getScheduleInfo } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -73,6 +74,33 @@ export async function GET(
 
     const participant = pRows[0];
     const now = new Date();
+
+    // Registered, but the quiz has not started yet: never send any questions.
+    const schedule = getScheduleInfo(quiz.startsAt, now);
+    if (
+      participant.status === "in_progress" &&
+      (schedule.state === "not_open" || schedule.state === "registration")
+    ) {
+      return NextResponse.json({
+        authenticated: true,
+        phase: "scheduled",
+        serverNow: now.toISOString(),
+        quiz: {
+          title: quiz.title,
+          slug: quiz.slug,
+          durationMinutes: quiz.durationMinutes,
+          maxParticipants: quiz.maxParticipants,
+          startsAt: schedule.startsAt!.toISOString(),
+        },
+        participant: {
+          id: participant.id,
+          studentName: participant.studentName,
+          answeredCount: 0,
+          totalQuestions: qList.length,
+        },
+      });
+    }
+
     const remainingSeconds = Math.max(
       0,
       Math.floor((new Date(participant.expiresAt).getTime() - now.getTime()) / 1000)

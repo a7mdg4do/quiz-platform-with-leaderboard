@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { quizzes, questions, participants } from "@/db/schema";
 import { eq, and, asc } from "drizzle-orm";
 import { computeScore } from "@/lib/quiz-service";
+import { isBeforeStart } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -65,6 +66,14 @@ export async function POST(
 
     const participant = pRows[0];
     const now = new Date();
+
+    if (isBeforeStart(quiz.startsAt, now)) {
+      return NextResponse.json(
+        { error: "الكويز لم يبدأ بعد.", notStarted: true },
+        { status: 403 }
+      );
+    }
+
     const expiresAtMs = new Date(participant.expiresAt).getTime();
 
     // 3-second grace window for in-flight requests right at 00:00

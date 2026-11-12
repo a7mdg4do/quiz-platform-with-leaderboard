@@ -7,6 +7,7 @@ import {
   syncExpiredParticipants,
   buildLeaderboard,
 } from "@/lib/quiz-service";
+import { getScheduleInfo } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
 
@@ -53,7 +54,11 @@ export async function GET(
       ? buildLeaderboard(pList, qList.length)
       : null;
 
+    const now = new Date();
+    const schedule = getScheduleInfo(quiz.startsAt, now);
+
     return NextResponse.json({
+      serverNow: now.toISOString(),
       quiz: {
         id: quiz.id,
         slug: quiz.slug,
@@ -67,6 +72,11 @@ export async function GET(
         participantsCount: pList.length,
         completedCount,
         seatsRemaining,
+        startsAt: schedule.startsAt ? schedule.startsAt.toISOString() : null,
+        registrationOpensAt: schedule.registrationOpensAt
+          ? schedule.registrationOpensAt.toISOString()
+          : null,
+        scheduleState: schedule.state,
       },
       leaderboard,
     });

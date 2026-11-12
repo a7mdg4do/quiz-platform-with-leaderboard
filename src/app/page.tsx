@@ -13,12 +13,9 @@ import LeaderboardCard from "@/components/LeaderboardCard";
 import {
   Clock,
   Users,
-  Shuffle,
-  Lock,
   ArrowLeft,
   Settings,
   FileText,
-  Trophy,
   BookOpen,
 } from "lucide-react";
 
@@ -147,9 +144,6 @@ export default async function HomePage() {
             <h1 className="mt-5 text-2xl font-bold leading-snug sm:text-4xl">
               {activeQuiz.title}
             </h1>
-            <p className="mt-3 max-w-3xl text-sm leading-relaxed text-slate-300 sm:text-base">
-              {activeQuiz.description}
-            </p>
 
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
@@ -171,52 +165,6 @@ export default async function HomePage() {
                 <Settings className="h-4 w-4" />
                 <span>إدارة الأسئلة ومشاركة الرابط</span>
               </Link>
-            </div>
-          </div>
-
-          {/* 4 Key System Guarantees */}
-          <div className="grid grid-cols-1 divide-y divide-slate-100 sm:grid-cols-2 sm:divide-y-0 sm:divide-x sm:divide-x-reverse lg:grid-cols-4">
-            <div className="p-5">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                <Shuffle className="h-4 w-4 text-teal-600" />
-                <span>تبديل عشوائي مزدوج</span>
-              </div>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                ترتيب الأسئلة العشرة ومواضع الخيارات (أ، ب، ج، د) يختلف لكل طالب
-                على حدة.
-              </p>
-            </div>
-
-            <div className="p-5">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                <Clock className="h-4 w-4 text-teal-600" />
-                <span>مؤقت 10 دقائق وحفظ فوري</span>
-              </div>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                تُحفظ الإجابات لحظياً في PostgreSQL مع تسليم تلقائي عند انتهاء
-                المدة.
-              </p>
-            </div>
-
-            <div className="p-5">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                <Lock className="h-4 w-4 text-teal-600" />
-                <span>حجب النتيجة بعد الحل</span>
-              </div>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                لا تظهر درجة الطالب عقب التسليم مطلقاً، وتظل سرية حتى قرار المعلم.
-              </p>
-            </div>
-
-            <div className="p-5">
-              <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
-                <Trophy className="h-4 w-4 text-teal-600" />
-                <span>لوحة صدارة (1 – 5)</span>
-              </div>
-              <p className="mt-1.5 text-xs leading-relaxed text-slate-600">
-                ترتيب تنافسي للطلاب الخمسة بالأسماء والدرجات والزمن يظهر فور
-                اعتماد المعلم.
-              </p>
             </div>
           </div>
         </section>

@@ -21,6 +21,8 @@ import {
   KeyRound,
   UserPlus,
   BookOpen,
+  ZoomIn,
+  X,
 } from "lucide-react";
 import LeaderboardCard, {
   type LeaderboardRow,
@@ -85,6 +87,8 @@ interface SafeQuestion {
   questionType?: "mcq" | "essay";
   points?: number;
   questionText: string;
+  imageUrl?: string | null;
+  imageCaption?: string | null;
   options: string[];
   selectedDisplayIndex: number | null;
   essayAnswer?: string;
@@ -185,6 +189,10 @@ export default function StudentQuizPage() {
   // Answer Review UI State (Phase 4)
   const [reviewIndex, setReviewIndex] = useState(0);
   const [reviewFilter, setReviewFilter] = useState<"all" | "wrong">("all");
+  const [zoomedFigure, setZoomedFigure] = useState<{
+    url: string;
+    caption?: string | null;
+  } | null>(null);
 
   // Scheduled-start state: server/client clock offset + 1s tick for countdowns
   const serverOffsetRef = useRef(0);
@@ -553,6 +561,73 @@ export default function StudentQuizPage() {
     setFlaggedIds((prev) => ({ ...prev, [questionId]: !prev[questionId] }));
   };
 
+  const renderQuestionFigure = (
+    imageUrl?: string | null,
+    imageCaption?: string | null
+  ) => {
+    if (!imageUrl) return null;
+    return (
+      <figure className="mt-4 overflow-hidden rounded-2xl border border-slate-200 bg-white p-3">
+        <button
+          type="button"
+          onClick={() =>
+            setZoomedFigure({ url: imageUrl, caption: imageCaption })
+          }
+          className="group relative flex w-full justify-center cursor-zoom-in"
+          title="اضغط لتكبير الشكل"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={imageUrl}
+            alt={imageCaption || "شكل توضيحي للسؤال"}
+            className="max-h-80 w-auto rounded-xl object-contain"
+          />
+          <span className="absolute bottom-2 left-2 inline-flex items-center gap-1 rounded-lg bg-slate-900/75 px-2.5 py-1 text-[11px] font-semibold text-white opacity-90 transition group-hover:bg-slate-900">
+            <ZoomIn className="h-3.5 w-3.5" />
+            <span>تكبير</span>
+          </span>
+        </button>
+        {imageCaption && (
+          <figcaption className="mt-2 text-center text-xs font-medium text-slate-600">
+            {imageCaption}
+          </figcaption>
+        )}
+      </figure>
+    );
+  };
+
+  const figureLightbox = zoomedFigure && (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
+      onClick={() => setZoomedFigure(null)}
+    >
+      <div
+        className="relative max-h-[92vh] max-w-4xl overflow-auto rounded-2xl bg-white p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          type="button"
+          onClick={() => setZoomedFigure(null)}
+          className="mb-2 mr-auto flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 cursor-pointer"
+          title="إغلاق"
+        >
+          <X className="h-4 w-4" />
+        </button>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={zoomedFigure.url}
+          alt={zoomedFigure.caption || "شكل توضيحي"}
+          className="max-h-[78vh] w-auto mx-auto rounded-xl object-contain"
+        />
+        {zoomedFigure.caption && (
+          <p className="mt-2.5 text-center text-sm font-medium text-slate-700">
+            {zoomedFigure.caption}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+
   if (loading) {
     return (
       <div className="flex min-h-screen flex-col items-center justify-center bg-slate-50 px-4">
@@ -893,6 +968,8 @@ export default function StudentQuizPage() {
               {activeQ.questionText}
             </h2>
 
+            {renderQuestionFigure(activeQ.imageUrl, activeQ.imageCaption)}
+
             {/* Question Answer Area: Essay or Shuffled MCQ Options */}
             {activeQ.questionType === "essay" ? (
               <div className="mt-6 space-y-2">
@@ -1038,6 +1115,7 @@ export default function StudentQuizPage() {
             </div>
           </div>
         )}
+        {figureLightbox}
       </div>
     );
   }
@@ -1395,6 +1473,11 @@ export default function StudentQuizPage() {
                   {activeReviewQ.questionText}
                 </h3>
 
+                {renderQuestionFigure(
+                  activeReviewQ.imageUrl,
+                  activeReviewQ.imageCaption
+                )}
+
                 {activeReviewQ.questionType === "essay" ? (
                   <div className="space-y-3">
                     <div className="rounded-xl border border-slate-200 bg-white p-4">
@@ -1534,6 +1617,7 @@ export default function StudentQuizPage() {
             quizTitle={publicInfo.title}
           />
         </div>
+        {figureLightbox}
       </div>
     );
   }

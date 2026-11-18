@@ -53,6 +53,8 @@ function buildStudentQuestions(
     const q = qMap.get(qId)!;
     const questionType = q.questionType === "essay" ? "essay" : "mcq";
     const points = Math.max(1, q.points ?? 1);
+    const imageUrl = q.imageUrl || null;
+    const imageCaption = imageUrl ? q.imageCaption || null : null;
 
     if (questionType === "essay") {
       const essayAnswer = participant.essayAnswers?.[qId] ?? "";
@@ -63,6 +65,8 @@ function buildStudentQuestions(
           questionType,
           points,
           questionText: q.questionText,
+          imageUrl,
+          imageCaption,
           options: [] as string[],
           selectedDisplayIndex: null,
           essayAnswer,
@@ -76,6 +80,8 @@ function buildStudentQuestions(
         questionType,
         points,
         questionText: q.questionText,
+        imageUrl,
+        imageCaption,
         options: [] as string[],
         selectedDisplayIndex: null,
         essayAnswer,
@@ -107,6 +113,8 @@ function buildStudentQuestions(
         questionType,
         points,
         questionText: q.questionText,
+        imageUrl,
+        imageCaption,
         options: shuffledOptions,
         selectedDisplayIndex: selectedVal,
       };
@@ -120,6 +128,8 @@ function buildStudentQuestions(
       questionType,
       points,
       questionText: q.questionText,
+      imageUrl,
+      imageCaption,
       options: shuffledOptions,
       selectedDisplayIndex: selectedVal,
       correctDisplayIndex: correctDisplayIndex >= 0 ? correctDisplayIndex : 0,

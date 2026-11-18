@@ -24,9 +24,45 @@ interface IncomingQuestion {
   questionType?: string;
   points?: number;
   questionText: string;
+  imageUrl?: string | null;
+  imageCaption?: string | null;
   options?: string[];
   correctOptionIndex?: number;
   modelAnswer?: string | null;
+}
+
+const SAFE_DATA_IMAGE_PREFIX =
+  /^data:image\/(png|jpeg|jpg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$/i;
+
+function sanitizeQuestionImageUrl(
+  raw: unknown,
+  questionNumber: number
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (raw === null || raw === undefined) return { ok: true, value: null };
+  if (typeof raw !== "string") {
+    return {
+      ok: false,
+      error: `صيغة رابط الصورة في السؤال رقم ${questionNumber} غير صالحة.`,
+    };
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: true, value: null };
+  if (trimmed.length > 2_200_000) {
+    return {
+      ok: false,
+      error: `حجم الصورة في السؤال رقم ${questionNumber} كبير جداً (الحد الأقصى ~1.5 ميجابايت).`,
+    };
+  }
+  if (
+    /^https?:\/\//i.test(trimmed) ||
+    SAFE_DATA_IMAGE_PREFIX.test(trimmed)
+  ) {
+    return { ok: true, value: trimmed };
+  }
+  return {
+    ok: false,
+    error: `رابط أو صيغة الصورة في السؤال رقم ${questionNumber} غير مدعومة.`,
+  };
 }
 
 export async function PUT(
@@ -98,6 +134,16 @@ export async function PUT(
           ? item.modelAnswer.trim() || null
           : null;
 
+      const imageCheck = sanitizeQuestionImageUrl(item.imageUrl, idx + 1);
+      if (!imageCheck.ok) {
+        return NextResponse.json({ error: imageCheck.error }, { status: 400 });
+      }
+      const cleanImageUrl = imageCheck.value;
+      const cleanImageCaption =
+        cleanImageUrl && typeof item.imageCaption === "string"
+          ? item.imageCaption.trim().slice(0, 300) || null
+          : null;
+
       if (qType === "mcq") {
         if (!Array.isArray(item.options) || item.options.length !== 4) {
           return NextResponse.json(
@@ -134,6 +180,8 @@ export async function PUT(
             questionType: qType,
             points: pts,
             questionText: cleanStem,
+            imageUrl: cleanImageUrl,
+            imageCaption: cleanImageCaption,
             options: cleanedOptions,
             correctOptionIndex: correctIdx,
             modelAnswer: cleanModelAnswer,
@@ -151,6 +199,8 @@ export async function PUT(
           questionType: qType,
           points: pts,
           questionText: cleanStem,
+          imageUrl: cleanImageUrl,
+          imageCaption: cleanImageCaption,
           options: cleanedOptions,
           correctOptionIndex: correctIdx,
           modelAnswer: cleanModelAnswer,

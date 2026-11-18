@@ -27,6 +27,8 @@ import {
   CheckCircle2,
   ClipboardCheck,
   X,
+  ImagePlus,
+  Upload,
 } from "lucide-react";
 import LeaderboardCard, {
   type LeaderboardRow,
@@ -77,9 +79,74 @@ interface EditableQuestion {
   questionType: "mcq" | "essay";
   points: number;
   questionText: string;
+  imageUrl?: string;
+  imageCaption?: string;
   options: string[];
   correctOptionIndex: number;
   modelAnswer?: string;
+}
+
+async function readImageFileAsDataUrl(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("يرجى اختيار ملف صورة صالح (PNG, JPG, WebP, GIF, SVG).");
+  }
+  const readRaw = () =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || ""));
+      reader.onerror = () => reject(new Error("تعذر قراءة ملف الصورة."));
+      reader.readAsDataURL(file);
+    });
+
+  // Keep SVG / GIF directly if within size limit
+  if (file.type === "image/svg+xml" || file.type === "image/gif") {
+    const raw = await readRaw();
+    if (raw.length > 2_000_000) {
+      throw new Error("حجم الصورة كبير جداً (الحد الأقصى 1.5 ميجابايت).");
+    }
+    return raw;
+  }
+
+  const rawDataUrl = await readRaw();
+  // Compress/resize raster images on canvas so diagrams/screenshots stay crisp & fast in DB
+  return new Promise<string>((resolve, reject) => {
+    const img = new window.Image();
+    img.onload = () => {
+      const maxDim = 1400;
+      let w = img.naturalWidth || img.width;
+      let h = img.naturalHeight || img.height;
+      if (w > maxDim || h > maxDim) {
+        const scale = Math.min(maxDim / w, maxDim / h);
+        w = Math.max(1, Math.round(w * scale));
+        h = Math.max(1, Math.round(h * scale));
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve(rawDataUrl);
+        return;
+      }
+      ctx.drawImage(img, 0, 0, w, h);
+      const compressed = canvas.toDataURL("image/webp", 0.84);
+      const best =
+        compressed.startsWith("data:image/webp") &&
+        compressed.length < rawDataUrl.length
+          ? compressed
+          : rawDataUrl.length <= 2_000_000
+          ? rawDataUrl
+          : canvas.toDataURL("image/jpeg", 0.82);
+
+      if (best.length > 2_000_000) {
+        reject(new Error("حجم الصورة بعد الضغط لا يزال كبيراً جداً."));
+        return;
+      }
+      resolve(best);
+    };
+    img.onerror = () => reject(new Error("تعذر معالجة ملف الصورة."));
+    img.src = rawDataUrl;
+  });
 }
 
 interface AdminParticipant {
@@ -210,6 +277,8 @@ export default function InstructorDashboardPage() {
               questionType?: string;
               points?: number;
               questionText: string;
+              imageUrl?: string | null;
+              imageCaption?: string | null;
               options: string[];
               correctOptionIndex: number;
               modelAnswer?: string | null;
@@ -218,6 +287,8 @@ export default function InstructorDashboardPage() {
               questionType: q.questionType === "essay" ? "essay" : "mcq",
               points: typeof q.points === "number" && q.points >= 1 ? q.points : 1,
               questionText: q.questionText,
+              imageUrl: q.imageUrl ?? "",
+              imageCaption: q.imageCaption ?? "",
               options:
                 Array.isArray(q.options) && q.options.length === 4
                   ? [...q.options]
@@ -438,6 +509,33 @@ export default function InstructorDashboardPage() {
     );
   };
 
+  const updateQuestionImage = (qIdx: number, url: string) => {
+    setQuestionsDirty(true);
+    setQuestionsDraft((prev) =>
+      prev.map((q, i) => (i === qIdx ? { ...q, imageUrl: url } : q))
+    );
+  };
+
+  const updateQuestionImageCaption = (qIdx: number, caption: string) => {
+    setQuestionsDirty(true);
+    setQuestionsDraft((prev) =>
+      prev.map((q, i) => (i === qIdx ? { ...q, imageCaption: caption } : q))
+    );
+  };
+
+  const handleQuestionImageUpload = async (qIdx: number, file: File | null) => {
+    if (!file) return;
+    try {
+      const dataUrl = await readImageFileAsDataUrl(file);
+      updateQuestionImage(qIdx, dataUrl);
+      showToast("تم إرفاق الصورة في السؤال (اضغط حفظ لتثبيتها في القاعدة).");
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "تعذر رفع الصورة."
+      );
+    }
+  };
+
   const updateQuestionOption = (qIdx: number, optIdx: number, val: string) => {
     setQuestionsDirty(true);
     setQuestionsDraft((prev) =>
@@ -467,6 +565,8 @@ export default function InstructorDashboardPage() {
         questionType: qType,
         points: qType === "essay" ? 2 : 1,
         questionText: "",
+        imageUrl: "",
+        imageCaption: "",
         options: ["", "", "", ""],
         correctOptionIndex: 0,
         modelAnswer: "",
@@ -1271,6 +1371,100 @@ export default function InstructorDashboardPage() {
                   />
                 </div>
 
+                {/* Question Figure / Image (Optional) */}
+                <div
+                  className="mt-4 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 p-4"
+                  onPaste={(e) => {
+                    const items = e.clipboardData?.items;
+                    if (!items) return;
+                    for (const item of Array.from(items)) {
+                      if (item.type.startsWith("image/")) {
+                        const file = item.getAsFile();
+                        if (file) {
+                          e.preventDefault();
+                          handleQuestionImageUpload(qIdx, file);
+                        }
+                        break;
+                      }
+                    }
+                  }}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700">
+                      <ImagePlus className="h-4 w-4 text-teal-600" />
+                      <span>صورة أو شكل توضيحي (Figure) — اختياري</span>
+                    </span>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="inline-flex items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 cursor-pointer">
+                        <Upload className="h-3.5 w-3.5" />
+                        <span>
+                          {qItem.imageUrl ? "تغيير الصورة" : "رفع صورة من الجهاز"}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={(e) => {
+                            const f = e.target.files?.[0] ?? null;
+                            e.target.value = "";
+                            handleQuestionImageUpload(qIdx, f);
+                          }}
+                        />
+                      </label>
+
+                      {qItem.imageUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            updateQuestionImage(qIdx, "");
+                            updateQuestionImageCaption(qIdx, "");
+                          }}
+                          className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-700 hover:bg-rose-100 cursor-pointer"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          <span>حذف الصورة</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {qItem.imageUrl ? (
+                    <div className="mt-3 space-y-2.5">
+                      <div className="flex justify-center rounded-xl border border-slate-200 bg-white p-3">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={qItem.imageUrl}
+                          alt={qItem.imageCaption || `صورة السؤال ${qIdx + 1}`}
+                          className="max-h-72 w-auto rounded-lg object-contain"
+                        />
+                      </div>
+                      <input
+                        type="text"
+                        value={qItem.imageCaption ?? ""}
+                        onChange={(e) =>
+                          updateQuestionImageCaption(qIdx, e.target.value)
+                        }
+                        placeholder="عنوان أو وصف الشكل (مثال: الشكل 1 — مخطط الدائرة المنطقية) — اختياري"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  ) : (
+                    <div className="mt-2.5 space-y-2">
+                      <input
+                        type="url"
+                        dir="ltr"
+                        value={qItem.imageUrl ?? ""}
+                        onChange={(e) =>
+                          updateQuestionImage(qIdx, e.target.value)
+                        }
+                        placeholder="أو ألصق رابط صورة (https://...) أو اضغط Ctrl+V للصق صورة من الحافظة"
+                        className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs text-slate-800 placeholder:text-right focus:border-teal-600 focus:outline-none"
+                      />
+                    </div>
+                  )}
+                </div>
+
                 {qItem.questionType === "essay" ? (
                   <div className="mt-4">
                     <label className="block text-xs font-bold text-indigo-900">
@@ -1645,6 +1839,22 @@ export default function InstructorDashboardPage() {
                       <p className="text-sm font-bold text-slate-900">
                         {q.questionText}
                       </p>
+
+                      {q.imageUrl && (
+                        <div className="rounded-xl border border-slate-200 bg-white p-2.5 text-center">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img
+                            src={q.imageUrl}
+                            alt={q.imageCaption || `صورة السؤال ${idx + 1}`}
+                            className="mx-auto max-h-48 w-auto rounded-lg object-contain"
+                          />
+                          {q.imageCaption && (
+                            <p className="mt-1.5 text-xs text-slate-500">
+                              {q.imageCaption}
+                            </p>
+                          )}
+                        </div>
+                      )}
 
                       {isEssay ? (
                         <div className="space-y-2">

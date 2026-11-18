@@ -35,6 +35,8 @@ export const questions = pgTable("questions", {
   questionType: text("question_type").notNull().default("mcq"), // "mcq" | "essay"
   points: integer("points").notNull().default(1),
   questionText: text("question_text").notNull(),
+  imageUrl: text("image_url"),
+  imageCaption: text("image_caption"),
   options: jsonb("options").$type<string[]>().notNull(),
   correctOptionIndex: integer("correct_option_index").notNull(),
   modelAnswer: text("model_answer"),

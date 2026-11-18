@@ -38,7 +38,11 @@ interface PublicQuizInfo {
   maxParticipants: number;
   isActive: boolean;
   resultsPublished: boolean;
+  gradingMode?: string;
   questionsCount: number;
+  mcqCount?: number;
+  essayCount?: number;
+  maxScore?: number;
   participantsCount: number;
   completedCount: number;
   seatsRemaining: number;
@@ -78,14 +82,29 @@ function formatCountdown(totalSeconds: number): string {
 interface SafeQuestion {
   id: string;
   number: number;
+  questionType?: "mcq" | "essay";
+  points?: number;
   questionText: string;
   options: string[];
   selectedDisplayIndex: number | null;
+  essayAnswer?: string;
 }
 
 interface ReviewQuestion extends SafeQuestion {
-  correctDisplayIndex: number;
+  correctDisplayIndex?: number;
+  modelAnswer?: string | null;
+  earnedPoints?: number;
+  maxPoints?: number;
+  isGraded?: boolean;
+  feedback?: string | null;
   isCorrect: boolean;
+}
+
+function isQuestionAnswered(q: SafeQuestion): boolean {
+  if (q.questionType === "essay") {
+    return (q.essayAnswer ?? "").trim().length > 0;
+  }
+  return q.selectedDisplayIndex !== null;
 }
 
 interface SessionData {
@@ -98,6 +117,7 @@ interface SessionData {
     durationMinutes: number;
     maxParticipants: number;
     resultsPublished?: boolean;
+    gradingMode?: string;
     startsAt?: string | null;
   };
   participant?: {
@@ -109,6 +129,8 @@ interface SessionData {
     remainingSeconds?: number;
     answeredCount: number;
     totalQuestions: number;
+    maxScore?: number;
+    pendingGradingCount?: number;
     timeTakenSeconds?: number | null;
     submittedAt?: string | null;
     score?: number | null;
@@ -155,6 +177,10 @@ export default function StudentQuizPage() {
   const [submitting, setSubmitting] = useState(false);
   const autoSubmitTriggeredRef = useRef(false);
   const deadlineMsRef = useRef<number | null>(null);
+  const essaySaveTimersRef = useRef<
+    Record<string, ReturnType<typeof setTimeout>>
+  >({});
+  const pendingEssaysRef = useRef<Record<string, string>>({});
 
   // Answer Review UI State (Phase 4)
   const [reviewIndex, setReviewIndex] = useState(0);
@@ -371,9 +397,7 @@ export default function StudentQuizPage() {
       const updatedQuestions = prev.questions.map((q) =>
         q.id === questionId ? { ...q, selectedDisplayIndex: displayIndex } : q
       );
-      const answeredCount = updatedQuestions.filter(
-        (q) => q.selectedDisplayIndex !== null
-      ).length;
+      const answeredCount = updatedQuestions.filter(isQuestionAnswered).length;
       return {
         ...prev,
         questions: updatedQuestions,
@@ -411,12 +435,88 @@ export default function StudentQuizPage() {
     }
   };
 
+  const postEssayAnswer = useCallback(
+    async (questionId: string, text: string) => {
+      setSavingState("saving");
+      try {
+        const token = getStoredToken();
+        const res = await fetch(`/api/quiz/${slug}/answer`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { "x-session-token": token } : {}),
+          },
+          body: JSON.stringify({
+            questionId,
+            essayText: text,
+            sessionToken: token,
+          }),
+        });
+
+        if (res.status === 403) {
+          await fetchAllState(true);
+          return;
+        }
+        if (res.ok) {
+          delete pendingEssaysRef.current[questionId];
+          setSavingState("saved");
+        }
+      } catch {
+        setSavingState("idle");
+      }
+    },
+    [slug, getStoredToken, fetchAllState]
+  );
+
+  const flushPendingEssays = useCallback(async () => {
+    const entries = Object.entries(pendingEssaysRef.current);
+    for (const qId of Object.keys(essaySaveTimersRef.current)) {
+      clearTimeout(essaySaveTimersRef.current[qId]);
+      delete essaySaveTimersRef.current[qId];
+    }
+    if (entries.length === 0) return;
+    await Promise.all(
+      entries.map(([qId, text]) => postEssayAnswer(qId, text))
+    );
+  }, [postEssayAnswer]);
+
+  const handleEssayChange = (questionId: string, text: string) => {
+    if (!session?.questions || session.phase !== "in_progress") return;
+
+    setSession((prev) => {
+      if (!prev || !prev.questions) return prev;
+      const updatedQuestions = prev.questions.map((q) =>
+        q.id === questionId ? { ...q, essayAnswer: text } : q
+      );
+      const answeredCount = updatedQuestions.filter(isQuestionAnswered).length;
+      return {
+        ...prev,
+        questions: updatedQuestions,
+        participant: prev.participant
+          ? { ...prev.participant, answeredCount }
+          : prev.participant,
+      };
+    });
+
+    pendingEssaysRef.current[questionId] = text;
+    setSavingState("saving");
+
+    if (essaySaveTimersRef.current[questionId]) {
+      clearTimeout(essaySaveTimersRef.current[questionId]);
+    }
+    essaySaveTimersRef.current[questionId] = setTimeout(() => {
+      delete essaySaveTimersRef.current[questionId];
+      postEssayAnswer(questionId, text);
+    }, 600);
+  };
+
   const handleFinalSubmit = async (isAutoExpired = false) => {
     if (submitting) return;
     setSubmitting(true);
     setConfirmSubmitOpen(false);
 
     try {
+      await flushPendingEssays();
       const token = getStoredToken();
       await fetch(`/api/quiz/${slug}/submit`, {
         method: "POST",
@@ -629,9 +729,7 @@ export default function StudentQuizPage() {
     const questionsList = session.questions;
     const safeIdx = Math.min(currentIndex, questionsList.length - 1);
     const activeQ = questionsList[safeIdx];
-    const answeredCount = questionsList.filter(
-      (q) => q.selectedDisplayIndex !== null
-    ).length;
+    const answeredCount = questionsList.filter(isQuestionAnswered).length;
     const unansweredCount = questionsList.length - answeredCount;
     const secLeft = remainingSec ?? session.participant?.remainingSeconds ?? 600;
     const isLowTime = secLeft <= 120 && secLeft > 45;
@@ -723,7 +821,7 @@ export default function StudentQuizPage() {
             <div className="flex flex-wrap gap-2">
               {questionsList.map((q, idx) => {
                 const isCurrent = idx === safeIdx;
-                const isAnswered = q.selectedDisplayIndex !== null;
+                const isAnswered = isQuestionAnswered(q);
                 const isFlagged = !!flaggedIds[q.id];
 
                 return (
@@ -752,9 +850,25 @@ export default function StudentQuizPage() {
           {/* Active Question Card */}
           <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-4">
-              <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700">
-                السؤال {safeIdx + 1} من {questionsList.length}
-              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700">
+                  السؤال {safeIdx + 1} من {questionsList.length}
+                </span>
+                <span
+                  className={`inline-flex items-center rounded-lg px-2.5 py-1 text-xs font-bold ${
+                    activeQ.questionType === "essay"
+                      ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
+                      : "bg-teal-50 text-teal-800 border border-teal-200"
+                  }`}
+                >
+                  {activeQ.questionType === "essay"
+                    ? "سؤال مقالي"
+                    : "اختيار من متعدد"}
+                </span>
+                <span className="inline-flex items-center rounded-lg bg-slate-50 border border-slate-200 px-2.5 py-1 font-mono-num text-xs font-semibold text-slate-600">
+                  {activeQ.points ?? 1} {(activeQ.points ?? 1) === 1 ? "درجة" : "درجات"}
+                </span>
+              </div>
 
               <button
                 type="button"
@@ -779,45 +893,70 @@ export default function StudentQuizPage() {
               {activeQ.questionText}
             </h2>
 
-            {/* Shuffled Options */}
-            <div className="mt-6 space-y-3.5">
-              {activeQ.options.map((optionText, optIdx) => {
-                const isSelected = activeQ.selectedDisplayIndex === optIdx;
-                const letter = ARABIC_OPTION_LABELS[optIdx] || String(optIdx + 1);
+            {/* Question Answer Area: Essay or Shuffled MCQ Options */}
+            {activeQ.questionType === "essay" ? (
+              <div className="mt-6 space-y-2">
+                <label className="block text-xs font-bold text-slate-600">
+                  اكتب إجابتك المقالية أدناه (تُحفظ تلقائياً أثناء الكتابة):
+                </label>
+                <textarea
+                  rows={7}
+                  value={activeQ.essayAnswer ?? ""}
+                  onChange={(e) =>
+                    handleEssayChange(activeQ.id, e.target.value)
+                  }
+                  onBlur={() => flushPendingEssays()}
+                  placeholder="اكتب إجابتك هنا بوضوح..."
+                  className="w-full rounded-2xl border-2 border-slate-200 bg-slate-50/40 p-4 text-base leading-relaxed text-slate-900 placeholder:text-slate-400 focus:border-teal-600 focus:bg-white focus:outline-none focus:ring-2 focus:ring-teal-600/15"
+                />
+                <div className="flex items-center justify-between text-xs text-slate-500">
+                  <span>تُراجع وتُصحح الإجابة المقالية يدوياً من المعلم.</span>
+                  <span className="font-mono-num">
+                    {(activeQ.essayAnswer ?? "").length} حرف
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 space-y-3.5">
+                {activeQ.options.map((optionText, optIdx) => {
+                  const isSelected = activeQ.selectedDisplayIndex === optIdx;
+                  const letter =
+                    ARABIC_OPTION_LABELS[optIdx] || String(optIdx + 1);
 
-                return (
-                  <button
-                    key={optIdx}
-                    type="button"
-                    onClick={() => handleSelectOption(activeQ.id, optIdx)}
-                    className={`group flex w-full items-start gap-4 rounded-2xl border-2 p-4 text-right transition-all cursor-pointer sm:p-5 ${
-                      isSelected
-                        ? "border-teal-600 bg-teal-50/70 shadow-xs"
-                        : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70"
-                    }`}
-                  >
-                    <span
-                      className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-base font-bold transition-colors ${
+                  return (
+                    <button
+                      key={optIdx}
+                      type="button"
+                      onClick={() => handleSelectOption(activeQ.id, optIdx)}
+                      className={`group flex w-full items-start gap-4 rounded-2xl border-2 p-4 text-right transition-all cursor-pointer sm:p-5 ${
                         isSelected
-                          ? "border-teal-600 bg-teal-600 text-white"
-                          : "border-slate-300 bg-slate-50 text-slate-700 group-hover:border-slate-400"
+                          ? "border-teal-600 bg-teal-50/70 shadow-xs"
+                          : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70"
                       }`}
                     >
-                      {letter}
-                    </span>
-                    <span
-                      className={`pt-1 text-base leading-relaxed ${
-                        isSelected
-                          ? "font-semibold text-slate-950"
-                          : "text-slate-800"
-                      }`}
-                    >
-                      {optionText}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+                      <span
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-base font-bold transition-colors ${
+                          isSelected
+                            ? "border-teal-600 bg-teal-600 text-white"
+                            : "border-slate-300 bg-slate-50 text-slate-700 group-hover:border-slate-400"
+                        }`}
+                      >
+                        {letter}
+                      </span>
+                      <span
+                        className={`pt-1 text-base leading-relaxed ${
+                          isSelected
+                            ? "font-semibold text-slate-950"
+                            : "text-slate-800"
+                        }`}
+                      >
+                        {optionText}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Bottom Navigation */}
             <div className="mt-8 flex items-center justify-between border-t border-slate-100 pt-5">
@@ -1098,11 +1237,21 @@ export default function StudentQuizPage() {
                 <p className="mt-0.5 font-mono-num text-3xl font-bold text-teal-700">
                   {p.score}{" "}
                   <span className="text-lg text-slate-400">
-                    / {p.totalQuestions}
+                    / {p.maxScore ?? p.totalQuestions}
                   </span>
                 </p>
               </div>
             </div>
+            {(p.pendingGradingCount ?? 0) > 0 && (
+              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs font-semibold text-amber-900">
+                ملاحظة: يوجد{" "}
+                <strong className="font-mono-num">
+                  {p.pendingGradingCount}
+                </strong>{" "}
+                سؤال لم يتم تصحيحه يدوياً من المعلم بعد؛ ستتحدث الدرجة فور
+                اعتماد التصحيح.
+              </div>
+            )}
           </div>
 
           {/* Question-by-Question Answer Review */}
@@ -1183,14 +1332,52 @@ export default function StudentQuizPage() {
               {/* Active Question Card */}
               <div className="rounded-2xl border border-slate-200 bg-slate-50/50 p-5 space-y-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-xs font-bold text-slate-500">
-                    سؤال {activeReviewQ.number} من {reviewList.length}
-                  </span>
-                  {activeReviewQ.isCorrect ? (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-bold text-slate-500">
+                      سؤال {activeReviewQ.number} من {reviewList.length}
+                    </span>
+                    <span
+                      className={`rounded-lg px-2 py-0.5 text-[11px] font-bold ${
+                        activeReviewQ.questionType === "essay"
+                          ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
+                          : "bg-slate-100 text-slate-700"
+                      }`}
+                    >
+                      {activeReviewQ.questionType === "essay"
+                        ? "مقالي"
+                        : "اختيار من متعدد"}
+                    </span>
+                    <span className="rounded-lg bg-white border border-slate-200 px-2 py-0.5 font-mono-num text-[11px] font-bold text-slate-700">
+                      {activeReviewQ.isGraded === false
+                        ? `من ${activeReviewQ.maxPoints ?? activeReviewQ.points ?? 1}`
+                        : `${activeReviewQ.earnedPoints ?? (activeReviewQ.isCorrect ? 1 : 0)} / ${activeReviewQ.maxPoints ?? activeReviewQ.points ?? 1} درجة`}
+                    </span>
+                  </div>
+
+                  {activeReviewQ.isGraded === false ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
+                      <Clock className="h-3.5 w-3.5" />
+                      بانتظار التصحيح اليدوي
+                    </span>
+                  ) : activeReviewQ.isCorrect ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-800">
                       <CheckCircle2 className="h-3.5 w-3.5" />
-                      إجابتك صحيحة
+                      {activeReviewQ.questionType === "essay"
+                        ? "درجة كاملة"
+                        : "إجابتك صحيحة"}
                     </span>
+                  ) : activeReviewQ.questionType === "essay" ? (
+                    (activeReviewQ.earnedPoints ?? 0) > 0 ? (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-teal-100 px-3 py-1 text-xs font-bold text-teal-800">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        إجابة مقبولة جزئياً
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-3 py-1 text-xs font-bold text-rose-800">
+                        <XCircle className="h-3.5 w-3.5" />
+                        لم تحصل على درجة
+                      </span>
+                    )
                   ) : activeReviewQ.selectedDisplayIndex === null ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">
                       <AlertTriangle className="h-3.5 w-3.5" />
@@ -1208,65 +1395,102 @@ export default function StudentQuizPage() {
                   {activeReviewQ.questionText}
                 </h3>
 
-                <div className="space-y-2.5">
-                  {activeReviewQ.options.map((optText, optIdx) => {
-                    const isCorrectOpt =
-                      optIdx === activeReviewQ.correctDisplayIndex;
-                    const isStudentChoice =
-                      optIdx === activeReviewQ.selectedDisplayIndex;
+                {activeReviewQ.questionType === "essay" ? (
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <p className="text-xs font-bold text-slate-500">
+                        إجابتك المكتوبة:
+                      </p>
+                      <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-slate-900">
+                        {activeReviewQ.essayAnswer?.trim()
+                          ? activeReviewQ.essayAnswer
+                          : "لم تكتب إجابة لهذا السؤال."}
+                      </p>
+                    </div>
 
-                    let cardStyle =
-                      "border-slate-200 bg-white text-slate-700";
-                    let badgeStyle =
-                      "border-slate-200 bg-slate-100 text-slate-600";
-
-                    if (isCorrectOpt) {
-                      cardStyle =
-                        "border-emerald-500 bg-emerald-50/80 text-emerald-950 font-semibold";
-                      badgeStyle =
-                        "border-emerald-500 bg-emerald-600 text-white";
-                    } else if (isStudentChoice && !isCorrectOpt) {
-                      cardStyle =
-                        "border-rose-400 bg-rose-50/80 text-rose-950";
-                      badgeStyle = "border-rose-500 bg-rose-600 text-white";
-                    }
-
-                    return (
-                      <div
-                        key={optIdx}
-                        className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3.5 text-sm ${cardStyle}`}
-                      >
-                        <div className="flex items-center gap-3">
-                          <span
-                            className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-xs font-bold ${badgeStyle}`}
-                          >
-                            {ARABIC_OPTION_LABELS[optIdx] ?? optIdx + 1}
-                          </span>
-                          <span className="leading-relaxed">{optText}</span>
-                        </div>
-
-                        {isCorrectOpt && isStudentChoice && (
-                          <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            إجابتك (صحيحة)
-                          </span>
-                        )}
-                        {isCorrectOpt && !isStudentChoice && (
-                          <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
-                            <CheckCircle2 className="h-3.5 w-3.5" />
-                            الإجابة الصحيحة
-                          </span>
-                        )}
-                        {isStudentChoice && !isCorrectOpt && (
-                          <span className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold text-white">
-                            <XCircle className="h-3.5 w-3.5" />
-                            إجابتك
-                          </span>
-                        )}
+                    {activeReviewQ.modelAnswer && (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-4">
+                        <p className="text-xs font-bold text-emerald-800">
+                          الإجابة النموذجية:
+                        </p>
+                        <p className="mt-1.5 whitespace-pre-wrap text-sm leading-relaxed text-emerald-950">
+                          {activeReviewQ.modelAnswer}
+                        </p>
                       </div>
-                    );
-                  })}
-                </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="space-y-2.5">
+                    {activeReviewQ.options.map((optText, optIdx) => {
+                      const isCorrectOpt =
+                        optIdx === activeReviewQ.correctDisplayIndex;
+                      const isStudentChoice =
+                        optIdx === activeReviewQ.selectedDisplayIndex;
+
+                      let cardStyle =
+                        "border-slate-200 bg-white text-slate-700";
+                      let badgeStyle =
+                        "border-slate-200 bg-slate-100 text-slate-600";
+
+                      if (isCorrectOpt) {
+                        cardStyle =
+                          "border-emerald-500 bg-emerald-50/80 text-emerald-950 font-semibold";
+                        badgeStyle =
+                          "border-emerald-500 bg-emerald-600 text-white";
+                      } else if (isStudentChoice && !isCorrectOpt) {
+                        cardStyle =
+                          "border-rose-400 bg-rose-50/80 text-rose-950";
+                        badgeStyle = "border-rose-500 bg-rose-600 text-white";
+                      }
+
+                      return (
+                        <div
+                          key={optIdx}
+                          className={`flex flex-wrap items-center justify-between gap-2 rounded-xl border p-3.5 text-sm ${cardStyle}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <span
+                              className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-xs font-bold ${badgeStyle}`}
+                            >
+                              {ARABIC_OPTION_LABELS[optIdx] ?? optIdx + 1}
+                            </span>
+                            <span className="leading-relaxed">{optText}</span>
+                          </div>
+
+                          {isCorrectOpt && isStudentChoice && (
+                            <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              إجابتك (صحيحة)
+                            </span>
+                          )}
+                          {isCorrectOpt && !isStudentChoice && (
+                            <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-xs font-bold text-white">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              الإجابة الصحيحة
+                            </span>
+                          )}
+                          {isStudentChoice && !isCorrectOpt && (
+                            <span className="inline-flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1 text-xs font-bold text-white">
+                              <XCircle className="h-3.5 w-3.5" />
+                              إجابتك
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {activeReviewQ.feedback && (
+                  <div className="rounded-xl border border-teal-200 bg-teal-50/60 p-3.5">
+                    <p className="text-xs font-bold text-teal-900">
+                      ملاحظة المعلم:
+                    </p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm text-teal-950">
+                      {activeReviewQ.feedback}
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Prev / Next Question Flip Controls */}
@@ -1305,6 +1529,7 @@ export default function StudentQuizPage() {
           <LeaderboardCard
             entries={session.leaderboard}
             maxParticipants={publicInfo.maxParticipants}
+            maxScore={p.maxScore ?? publicInfo.maxScore}
             highlightParticipantId={p.id}
             quizTitle={publicInfo.title}
           />
@@ -1343,6 +1568,7 @@ export default function StudentQuizPage() {
           <LeaderboardCard
             entries={publicLeaderboard}
             maxParticipants={publicInfo.maxParticipants}
+            maxScore={publicInfo.maxScore}
             quizTitle={publicInfo.title}
           />
         )}
@@ -1353,7 +1579,9 @@ export default function StudentQuizPage() {
             <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-teal-300">
               <span className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 border border-teal-400/30 px-3 py-1">
                 <BookOpen className="h-3.5 w-3.5" />
-                {publicInfo.questionsCount} أسئلة MCQ
+                {publicInfo.essayCount
+                  ? `${publicInfo.questionsCount} أسئلة (${publicInfo.mcqCount ?? 0} اختياري • ${publicInfo.essayCount} مقالي)`
+                  : `${publicInfo.questionsCount} أسئلة MCQ`}
               </span>
               <span className="inline-flex items-center gap-1 rounded-full bg-white/10 px-3 py-1 text-slate-200">
                 <Clock className="h-3.5 w-3.5" />

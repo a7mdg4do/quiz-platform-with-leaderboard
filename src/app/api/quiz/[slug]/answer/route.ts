@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { quizzes, questions, participants } from "@/db/schema";
 import { eq, and, asc } from "drizzle-orm";
-import { computeScore } from "@/lib/quiz-service";
+import { computeParticipantTotals } from "@/lib/quiz-service";
 import { isBeforeStart } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
@@ -26,12 +26,8 @@ export async function POST(
 
     const questionId =
       typeof body.questionId === "string" ? body.questionId : "";
-    const selectedDisplayIndex =
-      typeof body.selectedDisplayIndex === "number"
-        ? body.selectedDisplayIndex
-        : -1;
 
-    if (!questionId || selectedDisplayIndex < 0 || selectedDisplayIndex > 3) {
+    if (!questionId) {
       return NextResponse.json(
         { error: "بيانات الإجابة غير صالحة." },
         { status: 400 }
@@ -77,7 +73,10 @@ export async function POST(
     const expiresAtMs = new Date(participant.expiresAt).getTime();
 
     // 3-second grace window for in-flight requests right at 00:00
-    if (participant.status !== "in_progress" || now.getTime() > expiresAtMs + 3000) {
+    if (
+      participant.status !== "in_progress" ||
+      now.getTime() > expiresAtMs + 3000
+    ) {
       return NextResponse.json(
         { error: "انتهى وقت الاختبار المخصص لك.", expired: true },
         { status: 403 }
@@ -95,36 +94,77 @@ export async function POST(
       return NextResponse.json({ error: "السؤال غير موجود." }, { status: 404 });
     }
 
-    const perm =
-      participant.optionOrders?.[questionId] &&
-      participant.optionOrders[questionId].length === targetQuestion.options.length
-        ? participant.optionOrders[questionId]
-        : targetQuestion.options.map((_, i) => i);
+    let updatedAnswers = { ...(participant.answers ?? {}) };
+    let updatedEssayAnswers = { ...(participant.essayAnswers ?? {}) };
 
-    const canonicalOptionIndex = perm[selectedDisplayIndex];
-    if (typeof canonicalOptionIndex !== "number") {
-      return NextResponse.json({ error: "الخيار غير صالح." }, { status: 400 });
+    if (targetQuestion.questionType === "essay") {
+      if (typeof body.essayText !== "string") {
+        return NextResponse.json(
+          { error: "نص الإجابة المقالية غير صالح." },
+          { status: 400 }
+        );
+      }
+      updatedEssayAnswers = {
+        ...updatedEssayAnswers,
+        [questionId]: body.essayText.slice(0, 10000),
+      };
+    } else {
+      const selectedDisplayIndex =
+        typeof body.selectedDisplayIndex === "number"
+          ? body.selectedDisplayIndex
+          : -1;
+
+      if (selectedDisplayIndex < 0 || selectedDisplayIndex > 3) {
+        return NextResponse.json(
+          { error: "بيانات الإجابة غير صالحة." },
+          { status: 400 }
+        );
+      }
+
+      const perm =
+        participant.optionOrders?.[questionId] &&
+        participant.optionOrders[questionId].length ===
+          targetQuestion.options.length
+          ? participant.optionOrders[questionId]
+          : targetQuestion.options.map((_, i) => i);
+
+      const canonicalOptionIndex = perm[selectedDisplayIndex];
+      if (typeof canonicalOptionIndex !== "number") {
+        return NextResponse.json(
+          { error: "الخيار غير صالح." },
+          { status: 400 }
+        );
+      }
+
+      updatedAnswers = {
+        ...updatedAnswers,
+        [questionId]: canonicalOptionIndex,
+      };
     }
 
-    const updatedAnswers = {
-      ...(participant.answers ?? {}),
-      [questionId]: canonicalOptionIndex,
-    };
-
-    const updatedScore = computeScore(updatedAnswers, qList);
+    const totals = computeParticipantTotals(
+      quiz,
+      {
+        answers: updatedAnswers,
+        essayAnswers: updatedEssayAnswers,
+        manualScores: participant.manualScores ?? {},
+      },
+      qList
+    );
 
     await db
       .update(participants)
       .set({
         answers: updatedAnswers,
-        score: updatedScore,
+        essayAnswers: updatedEssayAnswers,
+        score: totals.score,
         totalQuestions: qList.length,
       })
       .where(eq(participants.id, participant.id));
 
     return NextResponse.json({
       ok: true,
-      answeredCount: Object.keys(updatedAnswers).length,
+      answeredCount: totals.answeredCount,
     });
   } catch (error) {
     console.error("POST /api/quiz/[slug]/answer error:", error);

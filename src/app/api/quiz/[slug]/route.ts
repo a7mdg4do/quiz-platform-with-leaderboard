@@ -6,6 +6,7 @@ import {
   ensureSeeded,
   syncExpiredParticipants,
   buildLeaderboard,
+  getMaxScore,
 } from "@/lib/quiz-service";
 import { getScheduleInfo } from "@/lib/schedule";
 
@@ -51,11 +52,14 @@ export async function GET(
     const seatsRemaining = Math.max(0, quiz.maxParticipants - pList.length);
 
     const leaderboard = quiz.resultsPublished
-      ? buildLeaderboard(pList, qList.length)
+      ? buildLeaderboard(pList, qList, quiz)
       : null;
 
     const now = new Date();
     const schedule = getScheduleInfo(quiz.startsAt, now);
+    const maxScore = getMaxScore(qList);
+    const essayCount = qList.filter((q) => q.questionType === "essay").length;
+    const mcqCount = qList.length - essayCount;
 
     return NextResponse.json({
       serverNow: now.toISOString(),
@@ -68,7 +72,11 @@ export async function GET(
         maxParticipants: quiz.maxParticipants,
         isActive: quiz.isActive,
         resultsPublished: quiz.resultsPublished,
+        gradingMode: quiz.gradingMode,
         questionsCount: qList.length,
+        mcqCount,
+        essayCount,
+        maxScore,
         participantsCount: pList.length,
         completedCount,
         seatsRemaining,

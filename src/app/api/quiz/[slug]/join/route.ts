@@ -156,8 +156,12 @@ export async function POST(
     const shuffledQuestionIds = shuffleArray(qList.map((q) => q.id));
     const optionOrders: Record<string, number[]> = {};
     for (const q of qList) {
-      const indices = q.options.map((_, idx) => idx);
-      optionOrders[q.id] = shuffleArray(indices);
+      if (q.questionType === "essay") {
+        optionOrders[q.id] = [];
+      } else {
+        const indices = q.options.map((_, idx) => idx);
+        optionOrders[q.id] = shuffleArray(indices);
+      }
     }
 
     // During the pre-start registration window the student's clock is anchored
@@ -183,6 +187,9 @@ export async function POST(
       questionOrder: shuffledQuestionIds,
       optionOrders,
       answers: {},
+      essayAnswers: {},
+      manualScores: {},
+      manualFeedback: {},
       status: "in_progress",
       score: 0,
       totalQuestions: qList.length,

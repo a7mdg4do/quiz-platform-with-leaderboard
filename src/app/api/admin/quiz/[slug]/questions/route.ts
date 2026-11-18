@@ -21,9 +21,12 @@ function getAdminPin(req: NextRequest): string | undefined {
 
 interface IncomingQuestion {
   id?: string;
+  questionType?: string;
+  points?: number;
   questionText: string;
-  options: string[];
-  correctOptionIndex: number;
+  options?: string[];
+  correctOptionIndex?: number;
+  modelAnswer?: string | null;
 }
 
 export async function PUT(
@@ -72,6 +75,14 @@ export async function PUT(
 
     for (let idx = 0; idx < incoming.length; idx++) {
       const item = incoming[idx];
+      const qType = item.questionType === "essay" ? "essay" : "mcq";
+      const pts =
+        typeof item.points === "number" &&
+        Number.isFinite(item.points) &&
+        item.points >= 1
+          ? Math.min(100, Math.round(item.points))
+          : 1;
+
       const cleanStem = (item.questionText || "").trim();
       if (!cleanStem) {
         return NextResponse.json(
@@ -80,30 +91,39 @@ export async function PUT(
         );
       }
 
-      if (!Array.isArray(item.options) || item.options.length !== 4) {
-        return NextResponse.json(
-          { error: `يجب توفير 4 خيارات للسؤال رقم ${idx + 1}.` },
-          { status: 400 }
+      let cleanedOptions: string[] = [];
+      let correctIdx = 0;
+      const cleanModelAnswer =
+        qType === "essay" && typeof item.modelAnswer === "string"
+          ? item.modelAnswer.trim() || null
+          : null;
+
+      if (qType === "mcq") {
+        if (!Array.isArray(item.options) || item.options.length !== 4) {
+          return NextResponse.json(
+            { error: `يجب توفير 4 خيارات للسؤال رقم ${idx + 1}.` },
+            { status: 400 }
+          );
+        }
+
+        cleanedOptions = item.options.map((opt) =>
+          stripLeadingArabicOptionPrefix(String(opt ?? ""))
         );
+
+        if (cleanedOptions.some((o) => !o)) {
+          return NextResponse.json(
+            { error: `جميع الخيارات الأربعة مطلوبة في السؤال رقم ${idx + 1}.` },
+            { status: 400 }
+          );
+        }
+
+        correctIdx =
+          typeof item.correctOptionIndex === "number" &&
+          item.correctOptionIndex >= 0 &&
+          item.correctOptionIndex <= 3
+            ? item.correctOptionIndex
+            : 0;
       }
-
-      const cleanedOptions = item.options.map((opt) =>
-        stripLeadingArabicOptionPrefix(String(opt ?? ""))
-      );
-
-      if (cleanedOptions.some((o) => !o)) {
-        return NextResponse.json(
-          { error: `جميع الخيارات الأربعة مطلوبة في السؤال رقم ${idx + 1}.` },
-          { status: 400 }
-        );
-      }
-
-      const correctIdx =
-        typeof item.correctOptionIndex === "number" &&
-        item.correctOptionIndex >= 0 &&
-        item.correctOptionIndex <= 3
-          ? item.correctOptionIndex
-          : 0;
 
       if (item.id && existingIds.has(item.id)) {
         keptIds.push(item.id);
@@ -111,9 +131,12 @@ export async function PUT(
           .update(questions)
           .set({
             orderIndex: idx,
+            questionType: qType,
+            points: pts,
             questionText: cleanStem,
             options: cleanedOptions,
             correctOptionIndex: correctIdx,
+            modelAnswer: cleanModelAnswer,
           })
           .where(
             and(eq(questions.id, item.id), eq(questions.quizId, quiz.id))
@@ -125,9 +148,12 @@ export async function PUT(
           id: newId,
           quizId: quiz.id,
           orderIndex: idx,
+          questionType: qType,
+          points: pts,
           questionText: cleanStem,
           options: cleanedOptions,
           correctOptionIndex: correctIdx,
+          modelAnswer: cleanModelAnswer,
         });
       }
     }

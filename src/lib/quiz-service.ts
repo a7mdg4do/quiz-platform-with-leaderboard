@@ -109,18 +109,99 @@ export function stripLeadingArabicOptionPrefix(text: string): string {
   return text.replace(/^\s*[أابجدABCDabcd]\s*[\)\-\.\:]\s*/, "").trim();
 }
 
-export function computeScore(
-  answers: Record<string, number>,
+export function getMaxScore(quizQuestions: Question[]): number {
+  return quizQuestions.reduce((sum, q) => sum + Math.max(1, q.points ?? 1), 0);
+}
+
+export function getParticipantAnsweredCount(
+  participant: Pick<Participant, "answers" | "essayAnswers">,
   quizQuestions: Question[]
 ): number {
-  let score = 0;
+  let count = 0;
   for (const q of quizQuestions) {
-    const chosen = answers[q.id];
-    if (typeof chosen === "number" && chosen === q.correctOptionIndex) {
-      score += 1;
+    if (q.questionType === "essay") {
+      if ((participant.essayAnswers?.[q.id] ?? "").trim().length > 0) {
+        count += 1;
+      }
+    } else if (typeof participant.answers?.[q.id] === "number") {
+      count += 1;
     }
   }
-  return score;
+  return count;
+}
+
+export interface QuestionGradingBreakdown {
+  earnedPoints: number;
+  maxPoints: number;
+  isGraded: boolean;
+  isManuallyGraded: boolean;
+}
+
+export function getQuestionScoreBreakdown(
+  q: Question,
+  participant: Pick<Participant, "answers" | "manualScores">,
+  gradingMode: string
+): QuestionGradingBreakdown {
+  const maxPoints = Math.max(1, q.points ?? 1);
+  const manualVal = participant.manualScores?.[q.id];
+  if (typeof manualVal === "number" && Number.isFinite(manualVal)) {
+    return {
+      earnedPoints: Math.max(0, Math.min(maxPoints, Math.round(manualVal))),
+      maxPoints,
+      isGraded: true,
+      isManuallyGraded: true,
+    };
+  }
+
+  if (q.questionType === "essay" || gradingMode === "manual_all") {
+    return {
+      earnedPoints: 0,
+      maxPoints,
+      isGraded: false,
+      isManuallyGraded: false,
+    };
+  }
+
+  const chosen = participant.answers?.[q.id];
+  const isCorrect =
+    typeof chosen === "number" && chosen === q.correctOptionIndex;
+  return {
+    earnedPoints: isCorrect ? maxPoints : 0,
+    maxPoints,
+    isGraded: true,
+    isManuallyGraded: false,
+  };
+}
+
+export function computeParticipantTotals(
+  quiz: Pick<Quiz, "gradingMode">,
+  participant: Pick<Participant, "answers" | "essayAnswers" | "manualScores">,
+  quizQuestions: Question[]
+): {
+  score: number;
+  maxScore: number;
+  answeredCount: number;
+  pendingGradingCount: number;
+} {
+  let score = 0;
+  let maxScore = 0;
+  let pendingGradingCount = 0;
+
+  for (const q of quizQuestions) {
+    const bd = getQuestionScoreBreakdown(q, participant, quiz.gradingMode);
+    score += bd.earnedPoints;
+    maxScore += bd.maxPoints;
+    if (!bd.isGraded) {
+      pendingGradingCount += 1;
+    }
+  }
+
+  return {
+    score,
+    maxScore,
+    answeredCount: getParticipantAnsweredCount(participant, quizQuestions),
+    pendingGradingCount,
+  };
 }
 
 export async function syncExpiredParticipants(
@@ -148,7 +229,7 @@ export async function syncExpiredParticipants(
       .orderBy(asc(questions.orderIndex)));
 
   for (const p of expiredOnes) {
-    const score = computeScore(p.answers ?? {}, qList);
+    const { score } = computeParticipantTotals(quiz, p, qList);
     const maxDurationSec = Math.max(
       1,
       Math.round(
@@ -171,6 +252,14 @@ export async function syncExpiredParticipants(
 }
 
 export async function recalculateQuizScores(quizId: string): Promise<void> {
+  const quizRows = await db
+    .select()
+    .from(quizzes)
+    .where(eq(quizzes.id, quizId))
+    .limit(1);
+  if (quizRows.length === 0) return;
+  const quiz = quizRows[0];
+
   const qList = await db
     .select()
     .from(questions)
@@ -182,12 +271,29 @@ export async function recalculateQuizScores(quizId: string): Promise<void> {
     .from(participants)
     .where(eq(participants.quizId, quizId));
 
+  const validQMap = new Map(qList.map((q) => [q.id, q]));
+
   for (const p of pList) {
-    const newScore = computeScore(p.answers ?? {}, qList);
+    const clampedManual: Record<string, number> = {};
+    for (const [qId, val] of Object.entries(p.manualScores ?? {})) {
+      const targetQ = validQMap.get(qId);
+      if (targetQ && typeof val === "number" && Number.isFinite(val)) {
+        const maxPts = Math.max(1, targetQ.points ?? 1);
+        clampedManual[qId] = Math.max(0, Math.min(maxPts, Math.round(val)));
+      }
+    }
+
+    const { score } = computeParticipantTotals(
+      quiz,
+      { ...p, manualScores: clampedManual },
+      qList
+    );
+
     await db
       .update(participants)
       .set({
-        score: newScore,
+        manualScores: clampedManual,
+        score,
         totalQuestions: qList.length,
       })
       .where(eq(participants.id, p.id));
@@ -199,17 +305,20 @@ export interface LeaderboardEntry {
   participantId: string;
   studentName: string;
   score: number;
+  maxScore: number;
   totalQuestions: number;
   percentage: number;
   timeTakenSeconds: number | null;
   status: string;
   answeredCount: number;
+  pendingGradingCount: number;
   submittedAt: string | null;
 }
 
 export function buildLeaderboard(
   pList: Participant[],
-  totalQuestionsCount: number
+  quizQuestions: Question[],
+  quiz: Pick<Quiz, "gradingMode">
 ): LeaderboardEntry[] {
   const sorted = [...pList].sort((a, b) => {
     // Completed/expired attempts rank by score DESC, then faster time ASC
@@ -224,19 +333,24 @@ export function buildLeaderboard(
     return new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime();
   });
 
+  const denomQuestions = quizQuestions.length;
+  const maxScore = getMaxScore(quizQuestions);
+
   return sorted.map((p, idx) => {
-    const denom = totalQuestionsCount || p.totalQuestions || 10;
-    const scoreVal = p.score ?? 0;
+    const totals = computeParticipantTotals(quiz, p, quizQuestions);
+    const scoreVal = p.score ?? totals.score;
     return {
       rank: idx + 1,
       participantId: p.id,
       studentName: p.studentName,
       score: scoreVal,
-      totalQuestions: denom,
-      percentage: denom > 0 ? Math.round((scoreVal / denom) * 100) : 0,
+      maxScore: maxScore || denomQuestions || 10,
+      totalQuestions: denomQuestions || p.totalQuestions || 10,
+      percentage: maxScore > 0 ? Math.round((scoreVal / maxScore) * 100) : 0,
       timeTakenSeconds: p.timeTakenSeconds,
       status: p.status,
-      answeredCount: Object.keys(p.answers ?? {}).length,
+      answeredCount: totals.answeredCount,
+      pendingGradingCount: totals.pendingGradingCount,
       submittedAt: p.submittedAt ? new Date(p.submittedAt).toISOString() : null,
     };
   });

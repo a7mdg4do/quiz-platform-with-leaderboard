@@ -8,11 +8,13 @@ export interface LeaderboardRow {
   participantId: string;
   studentName: string;
   score: number;
+  maxScore?: number;
   totalQuestions: number;
   percentage: number;
   timeTakenSeconds: number | null;
   status: string;
   answeredCount: number;
+  pendingGradingCount?: number;
 }
 
 export function formatDurationArabic(seconds: number | null | undefined): string {
@@ -25,6 +27,7 @@ export function formatDurationArabic(seconds: number | null | undefined): string
 interface LeaderboardCardProps {
   entries: LeaderboardRow[];
   maxParticipants?: number;
+  maxScore?: number;
   highlightParticipantId?: string | null;
   quizTitle?: string;
   isInstructorPreview?: boolean;
@@ -33,10 +36,13 @@ interface LeaderboardCardProps {
 export default function LeaderboardCard({
   entries,
   maxParticipants = 5,
+  maxScore,
   highlightParticipantId,
   quizTitle,
   isInstructorPreview = false,
 }: LeaderboardCardProps) {
+  const displayMaxScore =
+    maxScore ?? entries[0]?.maxScore ?? entries[0]?.totalQuestions ?? 10;
   const slotsCount = Math.max(maxParticipants, entries.length);
   const slots = Array.from({ length: slotsCount }, (_, idx) => {
     const rank = idx + 1;
@@ -134,7 +140,7 @@ export default function LeaderboardCard({
                     </p>
                     <div className="mt-2 flex items-center justify-between text-sm">
                       <span className="font-mono-num font-bold text-teal-700">
-                        {item.score} / {item.totalQuestions}
+                        {item.score} / {item.maxScore ?? item.totalQuestions}
                       </span>
                       <span className="inline-flex items-center gap-1 text-xs text-slate-500 font-mono-num">
                         <Clock className="h-3.5 w-3.5" />
@@ -195,6 +201,12 @@ export default function LeaderboardCard({
                           قيد الحل الآن
                         </span>
                       )}
+                      {isInstructorPreview &&
+                        (entry.pendingGradingCount ?? 0) > 0 && (
+                          <span className="rounded-full bg-amber-100 border border-amber-200 px-2 py-0.5 text-xs font-medium text-amber-900">
+                            بانتظار تصحيح {entry.pendingGradingCount}
+                          </span>
+                        )}
                     </div>
                     <div className="mt-1 flex items-center gap-3 text-xs text-slate-500">
                       <span className="inline-flex items-center gap-1">
@@ -223,7 +235,7 @@ export default function LeaderboardCard({
                         {entry.score}
                       </span>
                       <span className="font-mono-num text-sm text-slate-500">
-                        / {entry.totalQuestions}
+                        / {entry.maxScore ?? entry.totalQuestions}
                       </span>
                     </div>
                     <div className="text-xs font-medium text-teal-700 font-mono-num">
@@ -236,7 +248,9 @@ export default function LeaderboardCard({
                   )}
                 </div>
               ) : (
-                <span className="text-xs text-slate-400 font-mono-num">-- / 10</span>
+                <span className="text-xs text-slate-400 font-mono-num">
+                  -- / {displayMaxScore}
+                </span>
               )}
             </div>
           );

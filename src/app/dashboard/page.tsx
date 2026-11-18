@@ -25,6 +25,8 @@ import {
   FileText,
   Clock,
   CheckCircle2,
+  ClipboardCheck,
+  X,
 } from "lucide-react";
 import LeaderboardCard, {
   type LeaderboardRow,
@@ -43,6 +45,7 @@ interface QuizSummary {
   maxParticipants: number;
   isActive: boolean;
   resultsPublished: boolean;
+  gradingMode?: "auto_mcq" | "manual_all";
   startsAt?: string | null;
   questionsCount?: number;
   participantsCount?: number;
@@ -71,9 +74,12 @@ function formatScheduleTime(iso: string | Date): string {
 
 interface EditableQuestion {
   id?: string;
+  questionType: "mcq" | "essay";
+  points: number;
   questionText: string;
   options: string[];
   correctOptionIndex: number;
+  modelAnswer?: string;
 }
 
 interface AdminParticipant {
@@ -82,8 +88,14 @@ interface AdminParticipant {
   accessCode: string;
   status: string;
   score: number;
+  maxScore: number;
   totalQuestions: number;
   answeredCount: number;
+  pendingGradingCount: number;
+  answers: Record<string, number>;
+  essayAnswers: Record<string, string>;
+  manualScores: Record<string, number>;
+  manualFeedback: Record<string, string>;
   startedAt: string;
   expiresAt: string;
   submittedAt: string | null;
@@ -119,12 +131,27 @@ export default function InstructorDashboardPage() {
   const [creatingQuiz, setCreatingQuiz] = useState(false);
   const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
+  // Manual Grading Modal State
+  const [gradingParticipantId, setGradingParticipantId] = useState<
+    string | null
+  >(null);
+  const [manualScoresDraft, setManualScoresDraft] = useState<
+    Record<string, string>
+  >({});
+  const [manualFeedbackDraft, setManualFeedbackDraft] = useState<
+    Record<string, string>
+  >({});
+  const [savingGrading, setSavingGrading] = useState(false);
+
   // Settings form state
   const [titleInput, setTitleInput] = useState("");
   const [descInput, setDescInput] = useState("");
   const [durationInput, setDurationInput] = useState(10);
   const [maxStudentsInput, setMaxStudentsInput] = useState(5);
   const [isActiveInput, setIsActiveInput] = useState(true);
+  const [gradingModeInput, setGradingModeInput] = useState<
+    "auto_mcq" | "manual_all"
+  >("auto_mcq");
   const [startsAtInput, setStartsAtInput] = useState("");
   const [newPinInput, setNewPinInput] = useState("");
 
@@ -180,14 +207,23 @@ export default function InstructorDashboardPage() {
           (data.questions || []).map(
             (q: {
               id: string;
+              questionType?: string;
+              points?: number;
               questionText: string;
               options: string[];
               correctOptionIndex: number;
+              modelAnswer?: string | null;
             }) => ({
               id: q.id,
+              questionType: q.questionType === "essay" ? "essay" : "mcq",
+              points: typeof q.points === "number" && q.points >= 1 ? q.points : 1,
               questionText: q.questionText,
-              options: [...q.options],
-              correctOptionIndex: q.correctOptionIndex,
+              options:
+                Array.isArray(q.options) && q.options.length === 4
+                  ? [...q.options]
+                  : ["", "", "", ""],
+              correctOptionIndex: q.correctOptionIndex ?? 0,
+              modelAnswer: q.modelAnswer ?? "",
             })
           )
         );
@@ -197,6 +233,9 @@ export default function InstructorDashboardPage() {
         setDurationInput(qz.durationMinutes);
         setMaxStudentsInput(qz.maxParticipants);
         setIsActiveInput(qz.isActive);
+        setGradingModeInput(
+          qz.gradingMode === "manual_all" ? "manual_all" : "auto_mcq"
+        );
         setStartsAtInput(toLocalInputValue(qz.startsAt));
         setNewPinInput("");
       }
@@ -369,6 +408,36 @@ export default function InstructorDashboardPage() {
     );
   };
 
+  const updateQuestionType = (qIdx: number, nextType: "mcq" | "essay") => {
+    setQuestionsDirty(true);
+    setQuestionsDraft((prev) =>
+      prev.map((q, i) => {
+        if (i !== qIdx) return q;
+        return {
+          ...q,
+          questionType: nextType,
+          options:
+            q.options.length === 4 ? q.options : ["", "", "", ""],
+        };
+      })
+    );
+  };
+
+  const updateQuestionPoints = (qIdx: number, pts: number) => {
+    setQuestionsDirty(true);
+    const cleanPts = Number.isFinite(pts) ? Math.max(1, Math.min(100, Math.round(pts))) : 1;
+    setQuestionsDraft((prev) =>
+      prev.map((q, i) => (i === qIdx ? { ...q, points: cleanPts } : q))
+    );
+  };
+
+  const updateQuestionModelAnswer = (qIdx: number, val: string) => {
+    setQuestionsDirty(true);
+    setQuestionsDraft((prev) =>
+      prev.map((q, i) => (i === qIdx ? { ...q, modelAnswer: val } : q))
+    );
+  };
+
   const updateQuestionOption = (qIdx: number, optIdx: number, val: string) => {
     setQuestionsDirty(true);
     setQuestionsDraft((prev) =>
@@ -390,16 +459,97 @@ export default function InstructorDashboardPage() {
     );
   };
 
-  const addNewQuestion = () => {
+  const addNewQuestion = (qType: "mcq" | "essay" = "mcq") => {
     setQuestionsDirty(true);
     setQuestionsDraft((prev) => [
       ...prev,
       {
+        questionType: qType,
+        points: qType === "essay" ? 2 : 1,
         questionText: "",
         options: ["", "", "", ""],
         correctOptionIndex: 0,
+        modelAnswer: "",
       },
     ]);
+  };
+
+  // Manual Grading Modal Helpers
+  const activeGradingParticipant =
+    participants.find((p) => p.id === gradingParticipantId) ?? null;
+
+  const openGradingModal = (p: AdminParticipant) => {
+    const scoresMap: Record<string, string> = {};
+    const feedbackMap: Record<string, string> = {};
+    for (const q of questionsDraft) {
+      if (!q.id) continue;
+      if (typeof p.manualScores?.[q.id] === "number") {
+        scoresMap[q.id] = String(p.manualScores[q.id]);
+      } else {
+        scoresMap[q.id] = "";
+      }
+      feedbackMap[q.id] = p.manualFeedback?.[q.id] ?? "";
+    }
+    setManualScoresDraft(scoresMap);
+    setManualFeedbackDraft(feedbackMap);
+    setGradingParticipantId(p.id);
+  };
+
+  const handleAutoFillMcqInModal = () => {
+    if (!activeGradingParticipant) return;
+    setManualScoresDraft((prev) => {
+      const next = { ...prev };
+      for (const q of questionsDraft) {
+        if (!q.id || q.questionType === "essay") continue;
+        const chosen = activeGradingParticipant.answers?.[q.id];
+        const pts = Math.max(1, q.points || 1);
+        next[q.id] =
+          typeof chosen === "number" && chosen === q.correctOptionIndex
+            ? String(pts)
+            : "0";
+      }
+      return next;
+    });
+  };
+
+  const handleSaveGrading = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quiz || !activeGradingParticipant) return;
+    setSavingGrading(true);
+    try {
+      const payloadScores: Record<string, number | null> = {};
+      for (const [qId, raw] of Object.entries(manualScoresDraft)) {
+        const trimmed = raw.trim();
+        if (trimmed === "") {
+          payloadScores[qId] = null;
+        } else {
+          const num = Number(trimmed);
+          if (Number.isFinite(num)) {
+            payloadScores[qId] = num;
+          }
+        }
+      }
+
+      const res = await fetch(`/api/admin/quiz/${quiz.slug}/participants`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          participantId: activeGradingParticipant.id,
+          manualScores: payloadScores,
+          manualFeedback: manualFeedbackDraft,
+        }),
+      });
+      if (res.ok) {
+        setGradingParticipantId(null);
+        await loadQuizDetails(quiz.slug, questionsDirty);
+        showToast("تم حفظ درجات التصحيح اليدوي وتحديث لوحة الصدارة!");
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || "تعذر حفظ التصحيح.");
+      }
+    } finally {
+      setSavingGrading(false);
+    }
   };
 
   const removeQuestion = (qIdx: number) => {
@@ -461,6 +611,7 @@ export default function InstructorDashboardPage() {
           durationMinutes: Number(durationInput),
           maxParticipants: Number(maxStudentsInput),
           isActive: isActiveInput,
+          gradingMode: gradingModeInput,
           startsAt: startsAtInput
             ? new Date(startsAtInput).toISOString()
             : null,
@@ -906,7 +1057,14 @@ export default function InstructorDashboardPage() {
                             {p.answeredCount} / {p.totalQuestions}
                           </td>
                           <td className="py-3.5 px-3 font-mono-num font-bold text-teal-700">
-                            {p.score} / {p.totalQuestions}
+                            <div>
+                              {p.score} / {p.maxScore || p.totalQuestions}
+                            </div>
+                            {p.pendingGradingCount > 0 && (
+                              <span className="mt-0.5 inline-block rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-900">
+                                بانتظار تصحيح {p.pendingGradingCount}
+                              </span>
+                            )}
                           </td>
                           <td className="py-3.5 px-3 font-mono-num text-xs text-slate-600">
                             {p.status === "in_progress"
@@ -914,14 +1072,29 @@ export default function InstructorDashboardPage() {
                               : formatDurationArabic(p.timeTakenSeconds)}
                           </td>
                           <td className="py-3.5 px-3">
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteParticipant(p.id)}
-                              title="حذف محاولة الطالب"
-                              className="rounded-lg p-1.5 text-rose-600 hover:bg-rose-50 cursor-pointer"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => openGradingModal(p)}
+                                title="تصحيح يدوي ومراجعة إجابات الطالب"
+                                className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1.5 text-xs font-bold transition cursor-pointer ${
+                                  p.pendingGradingCount > 0
+                                    ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                                    : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                                }`}
+                              >
+                                <ClipboardCheck className="h-3.5 w-3.5" />
+                                <span>تصحيح</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteParticipant(p.id)}
+                                title="حذف محاولة الطالب"
+                                className="rounded-lg p-1.5 text-rose-600 hover:bg-rose-50 cursor-pointer"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}
@@ -935,6 +1108,10 @@ export default function InstructorDashboardPage() {
             <LeaderboardCard
               entries={leaderboardPreview}
               maxParticipants={quiz.maxParticipants}
+              maxScore={questionsDraft.reduce(
+                (sum, q) => sum + Math.max(1, q.points || 1),
+                0
+              )}
               quizTitle={quiz.title}
               isInstructorPreview={!quiz.resultsPublished}
             />
@@ -949,22 +1126,39 @@ export default function InstructorDashboardPage() {
             <div className="sticky top-3 z-20 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white/95 p-4 shadow-sm backdrop-blur-md">
               <div>
                 <h3 className="text-base font-bold text-slate-900">
-                  بنك أسئلة الاختبار ({questionsDraft.length} أسئلة)
+                  بنك أسئلة الاختبار ({questionsDraft.length} أسئلة •{" "}
+                  <span className="font-mono-num text-teal-700">
+                    {questionsDraft.reduce(
+                      (s, q) => s + Math.max(1, q.points || 1),
+                      0
+                    )}{" "}
+                    درجة
+                  </span>
+                  )
                 </h3>
                 <p className="text-xs text-slate-500">
-                  عدّل نص أي سؤال أو خياراته أو حدد الإجابة الصحيحة، ثم اضغط حفظ
-                  لتحديث قاعدة البيانات.
+                  أضف أسئلة اختيار من متعدد (MCQ) أو مقالية وحدد درجة كل سؤال؛
+                  تتبدل الأسئلة وخيارات الـ MCQ عشوائياً لكل طالب.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2.5">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={addNewQuestion}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 cursor-pointer"
+                  onClick={() => addNewQuestion("mcq")}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-bold text-slate-800 hover:bg-slate-50 cursor-pointer"
                 >
                   <Plus className="h-4 w-4" />
-                  <span>إضافة سؤال</span>
+                  <span>إضافة MCQ</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => addNewQuestion("essay")}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-200 bg-indigo-50 px-3.5 py-2.5 text-xs font-bold text-indigo-800 hover:bg-indigo-100 cursor-pointer"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>إضافة مقالي</span>
                 </button>
 
                 <button
@@ -989,9 +1183,50 @@ export default function InstructorDashboardPage() {
                 className="rounded-2xl border border-slate-200 bg-white p-6 shadow-xs"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                  <span className="rounded-lg bg-slate-900 px-3 py-1 text-xs font-bold text-white">
-                    السؤال #{qIdx + 1}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-lg bg-slate-900 px-3 py-1 text-xs font-bold text-white">
+                      السؤال #{qIdx + 1}
+                    </span>
+
+                    <div className="inline-flex rounded-lg bg-slate-100 p-0.5 text-xs font-bold">
+                      <button
+                        type="button"
+                        onClick={() => updateQuestionType(qIdx, "mcq")}
+                        className={`rounded-md px-2.5 py-1 transition cursor-pointer ${
+                          qItem.questionType === "mcq"
+                            ? "bg-white text-slate-900 shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        اختيار من متعدد
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => updateQuestionType(qIdx, "essay")}
+                        className={`rounded-md px-2.5 py-1 transition cursor-pointer ${
+                          qItem.questionType === "essay"
+                            ? "bg-white text-indigo-700 shadow-2xs"
+                            : "text-slate-600 hover:text-slate-900"
+                        }`}
+                      >
+                        مقالي (تصحيح يدوي)
+                      </button>
+                    </div>
+
+                    <label className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 mr-1">
+                      <span>الدرجة:</span>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={qItem.points}
+                        onChange={(e) =>
+                          updateQuestionPoints(qIdx, Number(e.target.value))
+                        }
+                        className="w-16 rounded-lg border border-slate-300 bg-white px-2 py-1 text-center font-mono-num text-xs text-slate-900 focus:border-teal-600 focus:outline-none"
+                      />
+                    </label>
+                  </div>
 
                   <div className="flex items-center gap-1.5">
                     <button
@@ -1036,56 +1271,73 @@ export default function InstructorDashboardPage() {
                   />
                 </div>
 
-                <div className="mt-4 space-y-3">
-                  <p className="text-xs font-bold text-slate-700">
-                    الخيارات الأربعة (انقر على الدائرة بجانب الخيار الصحيح — علماً
-                    بأن ترتيبها سيتبدل عشوائياً لكل طالب):
-                  </p>
+                {qItem.questionType === "essay" ? (
+                  <div className="mt-4">
+                    <label className="block text-xs font-bold text-indigo-900">
+                      الإجابة النموذجية / إرشادات التصحيح (اختياري)
+                    </label>
+                    <textarea
+                      rows={3}
+                      value={qItem.modelAnswer ?? ""}
+                      onChange={(e) =>
+                        updateQuestionModelAnswer(qIdx, e.target.value)
+                      }
+                      placeholder="اكتب النقاط الأساسية للإجابة الصحيحة لتسهيل التصحيح اليدوي وتوضيحها للطالب بعد النشر..."
+                      className="mt-1.5 w-full rounded-xl border border-indigo-200 bg-indigo-50/30 p-3 text-sm leading-relaxed text-slate-900 focus:border-indigo-500 focus:outline-none"
+                    />
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    <p className="text-xs font-bold text-slate-700">
+                      الخيارات الأربعة (انقر على الدائرة بجانب الخيار الصحيح — علماً
+                      بأن ترتيبها سيتبدل عشوائياً لكل طالب):
+                    </p>
 
-                  {qItem.options.map((optVal, optIdx) => {
-                    const isCorrect = qItem.correctOptionIndex === optIdx;
-                    return (
-                      <div
-                        key={optIdx}
-                        className={`flex items-start gap-3 rounded-xl border p-3 transition ${
-                          isCorrect
-                            ? "border-emerald-400 bg-emerald-50/50"
-                            : "border-slate-200 bg-slate-50/40"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => updateCorrectOption(qIdx, optIdx)}
-                          className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-xs font-bold transition cursor-pointer ${
+                    {qItem.options.map((optVal, optIdx) => {
+                      const isCorrect = qItem.correctOptionIndex === optIdx;
+                      return (
+                        <div
+                          key={optIdx}
+                          className={`flex items-start gap-3 rounded-xl border p-3 transition ${
                             isCorrect
-                              ? "border-emerald-600 bg-emerald-600 text-white"
-                              : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                              ? "border-emerald-400 bg-emerald-50/50"
+                              : "border-slate-200 bg-slate-50/40"
                           }`}
-                          title="تحديد كإجابة صحيحة"
                         >
-                          {ARABIC_LABELS[optIdx]}
-                        </button>
+                          <button
+                            type="button"
+                            onClick={() => updateCorrectOption(qIdx, optIdx)}
+                            className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border text-xs font-bold transition cursor-pointer ${
+                              isCorrect
+                                ? "border-emerald-600 bg-emerald-600 text-white"
+                                : "border-slate-300 bg-white text-slate-700 hover:border-slate-400"
+                            }`}
+                            title="تحديد كإجابة صحيحة"
+                          >
+                            {ARABIC_LABELS[optIdx]}
+                          </button>
 
-                        <div className="flex-1">
-                          <textarea
-                            rows={2}
-                            value={optVal}
-                            onChange={(e) =>
-                              updateQuestionOption(qIdx, optIdx, e.target.value)
-                            }
-                            placeholder={`نص الخيار (${ARABIC_LABELS[optIdx]})`}
-                            className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm leading-relaxed text-slate-900 focus:border-teal-600 focus:outline-none"
-                          />
-                          {isCorrect && (
-                            <span className="mt-1 inline-block text-xs font-bold text-emerald-700">
-                              ✓ هذه هي الإجابة الصحيحة المعتمدة في التصحيح
-                            </span>
-                          )}
+                          <div className="flex-1">
+                            <textarea
+                              rows={2}
+                              value={optVal}
+                              onChange={(e) =>
+                                updateQuestionOption(qIdx, optIdx, e.target.value)
+                              }
+                              placeholder={`نص الخيار (${ARABIC_LABELS[optIdx]})`}
+                              className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm leading-relaxed text-slate-900 focus:border-teal-600 focus:outline-none"
+                            />
+                            {isCorrect && (
+                              <span className="mt-1 inline-block text-xs font-bold text-emerald-700">
+                                ✓ هذه هي الإجابة الصحيحة المعتمدة في التصحيح
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1157,6 +1409,62 @@ export default function InstructorDashboardPage() {
                   onChange={(e) => setMaxStudentsInput(Number(e.target.value))}
                   className="mt-1.5 w-full rounded-xl border border-slate-300 px-4 py-2.5 font-mono-num text-sm text-slate-900 focus:border-teal-600 focus:outline-none"
                 />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-bold text-slate-800">
+                نظام التصحيح
+              </label>
+              <div className="mt-2 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                <label
+                  className={`flex items-start gap-2.5 rounded-xl border p-3.5 text-xs cursor-pointer transition ${
+                    gradingModeInput === "auto_mcq"
+                      ? "border-teal-600 bg-teal-50/60"
+                      : "border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="gradingMode"
+                    checked={gradingModeInput === "auto_mcq"}
+                    onChange={() => setGradingModeInput("auto_mcq")}
+                    className="mt-0.5 text-teal-600 focus:ring-teal-600"
+                  />
+                  <div>
+                    <p className="font-bold text-slate-900">
+                      تلقائي للـ MCQ + يدوي للمقالي
+                    </p>
+                    <p className="mt-0.5 text-slate-500">
+                      يُصحح الـ MCQ فوراً مع إمكانية تعديل أي درجة يدوياً،
+                      والمقالي يُصحح يدوياً.
+                    </p>
+                  </div>
+                </label>
+                <label
+                  className={`flex items-start gap-2.5 rounded-xl border p-3.5 text-xs cursor-pointer transition ${
+                    gradingModeInput === "manual_all"
+                      ? "border-teal-600 bg-teal-50/60"
+                      : "border-slate-200 hover:bg-slate-50"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="gradingMode"
+                    checked={gradingModeInput === "manual_all"}
+                    onChange={() => setGradingModeInput("manual_all")}
+                    className="mt-0.5 text-teal-600 focus:ring-teal-600"
+                  />
+                  <div>
+                    <p className="font-bold text-slate-900">
+                      تصحيح يدوي بالكامل
+                    </p>
+                    <p className="mt-0.5 text-slate-500">
+                      لا تُحسب أي درجة للـ MCQ أو المقالي إلا بعد مراجعتك
+                      واعتمادها يدوياً.
+                    </p>
+                  </div>
+                </label>
               </div>
             </div>
 
@@ -1236,6 +1544,265 @@ export default function InstructorDashboardPage() {
           </form>
         )}
       </main>
+
+      {/* Manual Grading Modal */}
+      {activeGradingParticipant && quiz && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs">
+          <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-bold text-slate-900">
+                  التصحيح اليدوي — {activeGradingParticipant.studentName}
+                </h3>
+                <p className="text-xs text-slate-500">
+                  أجاب على {activeGradingParticipant.answeredCount} من{" "}
+                  {activeGradingParticipant.totalQuestions} سؤال • الدرجة
+                  الحالية:{" "}
+                  <strong className="font-mono-num text-teal-700">
+                    {activeGradingParticipant.score} /{" "}
+                    {activeGradingParticipant.maxScore}
+                  </strong>
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleAutoFillMcqInModal}
+                  className="rounded-xl border border-teal-200 bg-teal-50 px-3 py-1.5 text-xs font-bold text-teal-800 hover:bg-teal-100 cursor-pointer"
+                >
+                  تعبئة درجات الـ MCQ تلقائياً
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setGradingParticipantId(null)}
+                  className="rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 cursor-pointer"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            <form
+              onSubmit={handleSaveGrading}
+              className="flex flex-1 flex-col overflow-hidden"
+            >
+              <div className="flex-1 space-y-4 overflow-y-auto p-6">
+                {questionsDraft.map((q, idx) => {
+                  if (!q.id) return null;
+                  const qId = q.id;
+                  const maxPts = Math.max(1, q.points || 1);
+                  const isEssay = q.questionType === "essay";
+                  const chosenIdx = activeGradingParticipant.answers?.[qId];
+                  const essayAns =
+                    activeGradingParticipant.essayAnswers?.[qId] ?? "";
+                  const draftScoreVal = manualScoresDraft[qId] ?? "";
+
+                  const autoSuggested =
+                    !isEssay &&
+                    typeof chosenIdx === "number" &&
+                    chosenIdx === q.correctOptionIndex
+                      ? maxPts
+                      : 0;
+
+                  return (
+                    <div
+                      key={qId}
+                      className="rounded-2xl border border-slate-200 bg-slate-50/50 p-4 space-y-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="rounded-lg bg-slate-900 px-2.5 py-0.5 text-xs font-bold text-white">
+                            #{idx + 1}
+                          </span>
+                          <span
+                            className={`rounded-lg px-2 py-0.5 text-xs font-bold ${
+                              isEssay
+                                ? "bg-indigo-100 text-indigo-800"
+                                : "bg-teal-100 text-teal-800"
+                            }`}
+                          >
+                            {isEssay ? "مقالي" : "اختيار من متعدد"}
+                          </span>
+                          <span className="font-mono-num text-xs font-bold text-slate-600">
+                            (الدرجة القصوى: {maxPts})
+                          </span>
+                        </div>
+
+                        {draftScoreVal === "" ? (
+                          <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-bold text-amber-900">
+                            {isEssay || gradingModeInput === "manual_all"
+                              ? "بانتظار الدرجة اليدوية"
+                              : `تلقائي: ${autoSuggested} / ${maxPts}`}
+                          </span>
+                        ) : (
+                          <span className="rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-bold text-emerald-800">
+                            درجة يدوية: {draftScoreVal} / {maxPts}
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="text-sm font-bold text-slate-900">
+                        {q.questionText}
+                      </p>
+
+                      {isEssay ? (
+                        <div className="space-y-2">
+                          <div className="rounded-xl border border-slate-200 bg-white p-3">
+                            <p className="text-xs font-bold text-slate-500">
+                              إجابة الطالب:
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-900">
+                              {essayAns.trim()
+                                ? essayAns
+                                : "لم يكتب الطالب إجابة."}
+                            </p>
+                          </div>
+                          {q.modelAnswer?.trim() && (
+                            <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+                              <p className="text-xs font-bold text-emerald-800">
+                                الإجابة النموذجية:
+                              </p>
+                              <p className="mt-1 whitespace-pre-wrap text-xs text-emerald-950">
+                                {q.modelAnswer}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 text-xs">
+                          <div className="rounded-lg border border-slate-200 bg-white p-2.5">
+                            <span className="font-bold text-slate-500">
+                              اختيار الطالب:{" "}
+                            </span>
+                            <span
+                              className={
+                                typeof chosenIdx === "number"
+                                  ? chosenIdx === q.correctOptionIndex
+                                    ? "font-bold text-emerald-700"
+                                    : "font-bold text-rose-700"
+                                  : "text-amber-700"
+                              }
+                            >
+                              {typeof chosenIdx === "number"
+                                ? `${ARABIC_LABELS[chosenIdx]} — ${q.options[chosenIdx] ?? ""}`
+                                : "لم يجب"}
+                            </span>
+                          </div>
+                          <div className="rounded-lg border border-emerald-200 bg-emerald-50/50 p-2.5">
+                            <span className="font-bold text-emerald-800">
+                              الإجابة الصحيحة:{" "}
+                            </span>
+                            <span className="font-semibold text-emerald-950">
+                              {ARABIC_LABELS[q.correctOptionIndex]} —{" "}
+                              {q.options[q.correctOptionIndex] ?? ""}
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <label className="text-xs font-bold text-slate-700">
+                          الدرجة المستحقة:
+                        </label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={maxPts}
+                          value={draftScoreVal}
+                          onChange={(e) =>
+                            setManualScoresDraft((prev) => ({
+                              ...prev,
+                              [qId]: e.target.value,
+                            }))
+                          }
+                          placeholder={
+                            !isEssay && gradingModeInput === "auto_mcq"
+                              ? String(autoSuggested)
+                              : "0"
+                          }
+                          className="w-20 rounded-lg border border-slate-300 bg-white px-2.5 py-1.5 text-center font-mono-num text-sm font-bold text-slate-900 focus:border-teal-600 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setManualScoresDraft((prev) => ({
+                              ...prev,
+                              [qId]: String(maxPts),
+                            }))
+                          }
+                          className="rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-100 cursor-pointer"
+                        >
+                          كاملة ({maxPts})
+                        </button>
+                        {maxPts >= 2 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setManualScoresDraft((prev) => ({
+                                ...prev,
+                                [qId]: String(Math.floor(maxPts / 2)),
+                              }))
+                            }
+                            className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-100 cursor-pointer"
+                          >
+                            نصف ({Math.floor(maxPts / 2)})
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setManualScoresDraft((prev) => ({
+                              ...prev,
+                              [qId]: "0",
+                            }))
+                          }
+                          className="rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1 text-xs font-bold text-rose-700 hover:bg-rose-100 cursor-pointer"
+                        >
+                          صفر (0)
+                        </button>
+
+                        <input
+                          type="text"
+                          value={manualFeedbackDraft[qId] ?? ""}
+                          onChange={(e) =>
+                            setManualFeedbackDraft((prev) => ({
+                              ...prev,
+                              [qId]: e.target.value,
+                            }))
+                          }
+                          placeholder="ملاحظة للطالب (اختياري)..."
+                          className="flex-1 min-w-[180px] rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs text-slate-800 focus:border-teal-600 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 border-t border-slate-100 bg-slate-50 px-6 py-4">
+                <button
+                  type="button"
+                  onClick={() => setGradingParticipantId(null)}
+                  className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 cursor-pointer"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingGrading}
+                  className="inline-flex items-center gap-2 rounded-xl bg-teal-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-teal-700 disabled:opacity-50 cursor-pointer"
+                >
+                  <Save className="h-4 w-4" />
+                  <span>
+                    {savingGrading ? "جاري الحفظ..." : "حفظ الدرجات"}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Confirm Reset All Modal */}
       {confirmResetOpen && (

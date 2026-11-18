@@ -17,6 +17,8 @@ export const quizzes = pgTable("quizzes", {
   isActive: boolean("is_active").notNull().default(true),
   resultsPublished: boolean("results_published").notNull().default(false),
   instructorPin: text("instructor_pin").notNull().default("2026"),
+  // "auto_mcq" (MCQ auto-graded + essay manual) | "manual_all" (all questions graded manually)
+  gradingMode: text("grading_mode").notNull().default("auto_mcq"),
   // Optional scheduled start. When set, new students can register starting
   // REGISTRATION_LEAD_MINUTES before this instant and the quiz opens at it.
   startsAt: timestamp("starts_at", { withTimezone: true }),
@@ -30,9 +32,12 @@ export const questions = pgTable("questions", {
     .notNull()
     .references(() => quizzes.id, { onDelete: "cascade" }),
   orderIndex: integer("order_index").notNull(),
+  questionType: text("question_type").notNull().default("mcq"), // "mcq" | "essay"
+  points: integer("points").notNull().default(1),
   questionText: text("question_text").notNull(),
   options: jsonb("options").$type<string[]>().notNull(),
   correctOptionIndex: integer("correct_option_index").notNull(),
+  modelAnswer: text("model_answer"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
@@ -51,6 +56,18 @@ export const participants = pgTable("participants", {
     .notNull(),
   answers: jsonb("answers")
     .$type<Record<string, number>>()
+    .notNull()
+    .default({}),
+  essayAnswers: jsonb("essay_answers")
+    .$type<Record<string, string>>()
+    .notNull()
+    .default({}),
+  manualScores: jsonb("manual_scores")
+    .$type<Record<string, number>>()
+    .notNull()
+    .default({}),
+  manualFeedback: jsonb("manual_feedback")
+    .$type<Record<string, string>>()
     .notNull()
     .default({}),
   status: text("status").notNull().default("in_progress"), // "in_progress" | "submitted" | "expired"

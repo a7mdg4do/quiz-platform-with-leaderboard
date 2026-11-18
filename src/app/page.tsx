@@ -7,6 +7,7 @@ import {
   ensureSeeded,
   syncExpiredParticipants,
   buildLeaderboard,
+  getMaxScore,
 } from "@/lib/quiz-service";
 import { DEFAULT_QUIZ_SLUG } from "@/lib/seed-data";
 import LeaderboardCard from "@/components/LeaderboardCard";
@@ -32,6 +33,7 @@ export default async function HomePage() {
     isActive: true,
     resultsPublished: false,
     questionsCount: 10,
+    maxScore: 10,
     participantsCount: 0,
     seatsRemaining: 5,
   };
@@ -70,12 +72,13 @@ export default async function HomePage() {
         isActive: qz.isActive,
         resultsPublished: qz.resultsPublished,
         questionsCount: qList.length,
+        maxScore: getMaxScore(qList),
         participantsCount: pList.length,
         seatsRemaining: Math.max(0, qz.maxParticipants - pList.length),
       };
 
       if (qz.resultsPublished) {
-        leaderboardData = buildLeaderboard(pList, qList.length);
+        leaderboardData = buildLeaderboard(pList, qList, qz);
       }
     }
   } catch {
@@ -175,6 +178,7 @@ export default async function HomePage() {
             <LeaderboardCard
               entries={leaderboardData}
               maxParticipants={activeQuiz.maxParticipants}
+              maxScore={activeQuiz.maxScore}
               quizTitle={activeQuiz.title}
             />
           </section>

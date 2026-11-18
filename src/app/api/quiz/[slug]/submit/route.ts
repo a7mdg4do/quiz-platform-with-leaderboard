@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
 import { quizzes, questions, participants } from "@/db/schema";
 import { eq, and, asc } from "drizzle-orm";
-import { computeScore } from "@/lib/quiz-service";
+import { computeParticipantTotals } from "@/lib/quiz-service";
 import { isBeforeStart } from "@/lib/schedule";
 
 export const dynamic = "force-dynamic";
@@ -88,7 +88,11 @@ export async function POST(
       )
     );
 
-    const finalScore = computeScore(participant.answers ?? {}, qList);
+    const { score: finalScore } = computeParticipantTotals(
+      quiz,
+      participant,
+      qList
+    );
 
     await db
       .update(participants)

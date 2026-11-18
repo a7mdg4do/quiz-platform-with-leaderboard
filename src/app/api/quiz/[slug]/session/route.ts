@@ -1,11 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/db";
-import { quizzes, questions, participants, type Participant, type Question } from "@/db/schema";
+import {
+  quizzes,
+  questions,
+  participants,
+  type Participant,
+  type Question,
+  type Quiz,
+} from "@/db/schema";
 import { eq, asc, and } from "drizzle-orm";
 import {
   ensureSeeded,
   syncExpiredParticipants,
   buildLeaderboard,
+  computeParticipantTotals,
+  getQuestionScoreBreakdown,
 } from "@/lib/quiz-service";
 import { getScheduleInfo } from "@/lib/schedule";
 
@@ -22,6 +31,7 @@ function extractToken(req: NextRequest, slug: string): string | null {
 }
 
 function buildStudentQuestions(
+  quiz: Pick<Quiz, "gradingMode">,
   participant: Participant,
   qList: Question[],
   includeCorrectAnswers: boolean
@@ -41,6 +51,43 @@ function buildStudentQuestions(
 
   return orderedIds.map((qId, displayNumber) => {
     const q = qMap.get(qId)!;
+    const questionType = q.questionType === "essay" ? "essay" : "mcq";
+    const points = Math.max(1, q.points ?? 1);
+
+    if (questionType === "essay") {
+      const essayAnswer = participant.essayAnswers?.[qId] ?? "";
+      if (!includeCorrectAnswers) {
+        return {
+          id: q.id,
+          number: displayNumber + 1,
+          questionType,
+          points,
+          questionText: q.questionText,
+          options: [] as string[],
+          selectedDisplayIndex: null,
+          essayAnswer,
+        };
+      }
+
+      const bd = getQuestionScoreBreakdown(q, participant, quiz.gradingMode);
+      return {
+        id: q.id,
+        number: displayNumber + 1,
+        questionType,
+        points,
+        questionText: q.questionText,
+        options: [] as string[],
+        selectedDisplayIndex: null,
+        essayAnswer,
+        modelAnswer: q.modelAnswer || null,
+        earnedPoints: bd.earnedPoints,
+        maxPoints: bd.maxPoints,
+        isGraded: bd.isGraded,
+        feedback: participant.manualFeedback?.[qId] || null,
+        isCorrect: bd.isGraded && bd.earnedPoints >= bd.maxPoints,
+      };
+    }
+
     const perm =
       participant.optionOrders?.[qId] &&
       participant.optionOrders[qId].length === q.options.length
@@ -57,6 +104,8 @@ function buildStudentQuestions(
       return {
         id: q.id,
         number: displayNumber + 1,
+        questionType,
+        points,
         questionText: q.questionText,
         options: shuffledOptions,
         selectedDisplayIndex: selectedVal,
@@ -64,14 +113,21 @@ function buildStudentQuestions(
     }
 
     const correctDisplayIndex = perm.indexOf(q.correctOptionIndex);
+    const bd = getQuestionScoreBreakdown(q, participant, quiz.gradingMode);
     return {
       id: q.id,
       number: displayNumber + 1,
+      questionType,
+      points,
       questionText: q.questionText,
       options: shuffledOptions,
       selectedDisplayIndex: selectedVal,
       correctDisplayIndex: correctDisplayIndex >= 0 ? correctDisplayIndex : 0,
-      isCorrect: selectedVal !== null && selectedVal === correctDisplayIndex,
+      earnedPoints: bd.earnedPoints,
+      maxPoints: bd.maxPoints,
+      isGraded: bd.isGraded,
+      feedback: participant.manualFeedback?.[qId] || null,
+      isCorrect: bd.isGraded && bd.earnedPoints >= bd.maxPoints,
     };
   });
 }
@@ -171,8 +227,15 @@ export async function GET(
       (p) => p.status !== "in_progress"
     ).length;
 
+    const totals = computeParticipantTotals(quiz, participant, qList);
+
     if (participant.status === "in_progress" && remainingSeconds > 0) {
-      const safeQuestions = buildStudentQuestions(participant, qList, false);
+      const safeQuestions = buildStudentQuestions(
+        quiz,
+        participant,
+        qList,
+        false
+      );
 
       return NextResponse.json({
         authenticated: true,
@@ -190,7 +253,7 @@ export async function GET(
           startedAt: new Date(participant.startedAt).toISOString(),
           expiresAt: new Date(participant.expiresAt).toISOString(),
           remainingSeconds,
-          answeredCount: Object.keys(participant.answers ?? {}).length,
+          answeredCount: totals.answeredCount,
           totalQuestions: safeQuestions.length,
         },
         questions: safeQuestions,
@@ -200,7 +263,7 @@ export async function GET(
     // Participant has finished (submitted or expired)
     // CRITICAL REQUIREMENT: Never expose score or leaderboard until instructor sets resultsPublished = true
     const leaderboard = quiz.resultsPublished
-      ? buildLeaderboard(allParticipants, qList.length)
+      ? buildLeaderboard(allParticipants, qList, quiz)
       : null;
 
     const myLeaderboardEntry = leaderboard
@@ -217,13 +280,18 @@ export async function GET(
         durationMinutes: quiz.durationMinutes,
         maxParticipants: quiz.maxParticipants,
         resultsPublished: quiz.resultsPublished,
+        gradingMode: quiz.gradingMode,
       },
       participant: {
         id: participant.id,
         studentName: participant.studentName,
         status: participant.status,
-        answeredCount: Object.keys(participant.answers ?? {}).length,
+        answeredCount: totals.answeredCount,
         totalQuestions: qList.length,
+        maxScore: totals.maxScore,
+        pendingGradingCount: quiz.resultsPublished
+          ? totals.pendingGradingCount
+          : undefined,
         timeTakenSeconds: participant.timeTakenSeconds,
         submittedAt: participant.submittedAt
           ? new Date(participant.submittedAt).toISOString()
@@ -239,7 +307,7 @@ export async function GET(
       },
       leaderboard,
       reviewQuestions: quiz.resultsPublished
-        ? buildStudentQuestions(participant, qList, true)
+        ? buildStudentQuestions(quiz, participant, qList, true)
         : null,
     });
   } catch (error) {

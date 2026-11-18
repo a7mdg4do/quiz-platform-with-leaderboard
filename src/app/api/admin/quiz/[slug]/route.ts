@@ -7,7 +7,8 @@ import {
   isAuthorizedInstructor,
   syncExpiredParticipants,
   buildLeaderboard,
-  computeScore,
+  computeParticipantTotals,
+  recalculateQuizScores,
   toAdminQuiz,
 } from "@/lib/quiz-service";
 
@@ -74,14 +75,21 @@ export async function GET(
             )
           : 0;
 
+      const totals = computeParticipantTotals(quiz, p, qList);
       return {
         id: p.id,
         studentName: p.studentName,
         accessCode: p.accessCode,
         status: p.status,
         score: p.score,
+        maxScore: totals.maxScore,
         totalQuestions: qList.length,
-        answeredCount: Object.keys(p.answers ?? {}).length,
+        answeredCount: totals.answeredCount,
+        pendingGradingCount: totals.pendingGradingCount,
+        answers: p.answers ?? {},
+        essayAnswers: p.essayAnswers ?? {},
+        manualScores: p.manualScores ?? {},
+        manualFeedback: p.manualFeedback ?? {},
         startedAt: new Date(p.startedAt).toISOString(),
         expiresAt: new Date(p.expiresAt).toISOString(),
         submittedAt: p.submittedAt ? new Date(p.submittedAt).toISOString() : null,
@@ -90,7 +98,7 @@ export async function GET(
       };
     });
 
-    const leaderboardPreview = buildLeaderboard(pList, qList.length);
+    const leaderboardPreview = buildLeaderboard(pList, qList, quiz);
 
     return NextResponse.json({
       quiz: toAdminQuiz(quiz),
@@ -157,7 +165,7 @@ export async function PATCH(
               )
             )
           );
-          const score = computeScore(p.answers ?? {}, qList);
+          const { score } = computeParticipantTotals(quiz, p, qList);
           await db
             .update(participants)
             .set({
@@ -195,6 +203,12 @@ export async function PATCH(
       updates.resultsPublished = body.resultsPublished;
     }
     if (
+      body.gradingMode === "auto_mcq" ||
+      body.gradingMode === "manual_all"
+    ) {
+      updates.gradingMode = body.gradingMode;
+    }
+    if (
       typeof body.instructorPin === "string" &&
       body.instructorPin.trim().length >= 3
     ) {
@@ -216,6 +230,10 @@ export async function PATCH(
     }
 
     await db.update(quizzes).set(updates).where(eq(quizzes.id, quiz.id));
+
+    if ("gradingMode" in updates) {
+      await recalculateQuizScores(quiz.id);
+    }
 
     // If the schedule changed, move students who registered but have not
     // started yet so their personal timer follows the new start time.
